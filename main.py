@@ -1,77 +1,97 @@
 import click
 import json
-import os 
-from disk_analyzer import analyze_disk_image # Zajišťuje, že používáš správnou verzi
+import os
+import logging
+from disk_analyzer import analyze_disk_image
+from validators import validate_image_file, validate_yara_rules
 
-# --- ZÁKLADNÍ FUNKCE PRO STRUKTUROVANÝ VÝSTUP ---
+logger = logging.getLogger(__name__)
+
+
 def print_output(data, format_type='json'):
-    """Vypíše data ve strukturovaném formátu (JSON je standard)."""
+    """Prints data in structured format (JSON is default)."""
     if format_type == 'json':
-        # Používáme json.dumps pro hezké formátování (indent=4)
         click.echo(json.dumps(data, indent=4))
-    # V budoucnu zde můžeš přidat 'csv' nebo 'table' formáty.
 
 @click.group()
-def cli():
-    """ForensicAutoCLI: Automatizovaný nástroj pro předběžnou analýzu forenzních dat."""
-    pass
+@click.option('--verbose', '-v', count=True, 
+              help='Increase output verbosity (-v: INFO, -vv: DEBUG)')
+def cli(verbose):
+    """ForensicAutoCLI: Automated tool for preliminary forensic data analysis."""
+    if verbose == 0:
+        log_level = logging.WARNING
+    elif verbose == 1:
+        log_level = logging.INFO
+    else:
+        log_level = logging.DEBUG
+    
+    logging.basicConfig(
+        level=log_level,
+        format='%(levelname)s: %(message)s',
+        force=True
+    )
+    
+    logger.debug(f"Logging level set to: {logging.getLevelName(log_level)}")
 
-# --- 1. MODUL: Paměťový dump (memory) ---
 @cli.command()
 @click.argument('filepath', type=click.Path(exists=True))
 def memory(filepath):
-    """Provede základní analýzu paměťového výpisu (memory dump).
-    FILEPATH: Cesta k souboru s paměťovým výpisem.
-    """
-    click.echo(f"Analyzuji paměťový výpis: {os.path.basename(filepath)}")
+    """Performs basic analysis of memory dump.
     
-    # Do tohoto bloku budeme integrovat Volatility / VolPy
+    FILEPATH: Path to memory dump file.
+    """
+    click.echo(f"Analyzing memory dump: {os.path.basename(filepath)}")
+    
     results = {
         "analysis_type": "memory_dump",
         "input_file": filepath,
         "size": f"{os.path.getsize(filepath) / (1024*1024):.2f} MB",
-        "status": "in progress",
-        "processes_found": 0,
-        "note": "Ceka na integraci Volatility a extrakci dat."
+        "status": "not_implemented",
+        "note": "Awaiting Volatility integration."
     }
     
     print_output(results)
 
-# --- 2. MODUL: Obraz disku (disk) ---
 @cli.command()
 @click.argument('filepath', type=click.Path(exists=True))
-def disk(filepath):
-    """Provede základní analýzu obrazu disku (RAW, E01 atd.).
-    FILEPATH: Cesta k souboru s obrazem disku.
+@click.option('--yara-rules', '-y', type=click.Path(exists=True), 
+              help='Path to YARA rules file (default: rules/my_rules.yar)')
+@click.option('--quick', is_flag=True, 
+              help='Quick mode - limit scan and skip YARA')
+def disk(filepath, yara_rules, quick):
+    """Performs basic analysis of disk image (RAW, E01, etc.).
+    
+    FILEPATH: Path to disk image file.
     """
-    click.echo(f"Analyzuji obraz disku: {os.path.basename(filepath)}")
+    is_valid, error = validate_image_file(filepath)
+    if not is_valid:
+        click.echo(json.dumps({"error": error}, indent=4), err=True)
+        return
     
-    # NOVÝ KÓD pro integraci PyTSK3
+    if yara_rules:
+        is_valid, error = validate_yara_rules(yara_rules)
+        if not is_valid:
+            click.echo(json.dumps({"error": error}, indent=4), err=True)
+            return
     
-    # TSK analýza
-    analysis_data = analyze_disk_image(filepath) # Nyní vrací sjednocený slovník!
+    click.echo(f"Analyzing disk image: {os.path.basename(filepath)}")
     
-    # 1. Kontrola chyb
+    analysis_data = analyze_disk_image(filepath, quick_mode=quick, yara_rules_path=yara_rules)
+    
     if "error" in analysis_data:
-        # Původní chyba z analyze_disk_image
         summary = {
             "analysis_type": "disk_image",
             "input_file": filepath,
-            "total_size_mb": "0.00", # Pro chybu není možné velikost spočítat
+            "total_size_mb": "0.00",
             "files_scanned": 0,
-            "directories_scanned": 1, # Kvůli původnímu formátu, kde se chyba objevila po 1 dir
-            "status": "completed", # Ponecháme completed, ale výsledky jsou v chybě
+            "directories_scanned": 0,
+            "status": "error",
             "results": [analysis_data]
         }
-    
-    # 2. Úspěšná analýza
     else:
-        # Přímé použití hodnot ze slovníku
         file_list = analysis_data['results']
         total_files = analysis_data['files_scanned']
         total_dirs = analysis_data['directories_scanned']
-
-        # Vypocet celkove velikosti pro prehled
         total_size = sum(f.get('size', 0) for f in file_list if f.get('type') == 'file')
         
         summary = {
@@ -81,12 +101,10 @@ def disk(filepath):
             "files_scanned": total_files,
             "directories_scanned": total_dirs,
             "status": "completed",
-            "results": file_list # Vložení skutečných dat (včetně systémových záznamů)
+            "results": file_list
         }
     
     print_output(summary)
-
-# Zde v budoucnu přidáme 'log' modul pro logy a další.
 
 if __name__ == '__main__':
     cli()

@@ -3,15 +3,16 @@ import json
 import os
 import logging
 from disk_analyzer import analyze_disk_image
-from validators import validate_image_file, validate_yara_rules
+from validators import validate_image_file, validate_yara_rules, validate_output_format
+from output_formatter import format_output
 
 logger = logging.getLogger(__name__)
 
 
 def print_output(data, format_type='json'):
     """Prints data in structured format (JSON is default)."""
-    if format_type == 'json':
-        click.echo(json.dumps(data, indent=4))
+    output = format_output(data, format_type)
+    click.echo(output)
 
 @click.group()
 @click.option('--verbose', '-v', count=True, 
@@ -58,7 +59,9 @@ def memory(filepath):
               help='Path to YARA rules file (default: rules/my_rules.yar)')
 @click.option('--quick', is_flag=True, 
               help='Quick mode - limit scan and skip YARA')
-def disk(filepath, yara_rules, quick):
+@click.option('--output', '-o', type=click.Choice(['json', 'csv', 'table'], case_sensitive=False),
+              default='json', help='Output format (default: json)')
+def disk(filepath, yara_rules, quick, output):
     """Performs basic analysis of disk image (RAW, E01, etc.).
     
     FILEPATH: Path to disk image file.
@@ -94,17 +97,35 @@ def disk(filepath, yara_rules, quick):
         total_dirs = analysis_data['directories_scanned']
         total_size = sum(f.get('size', 0) for f in file_list if f.get('type') == 'file')
         
+        # Format size intelligently
+        if total_size < 1024:
+            size_display = f"{total_size} bytes"
+        elif total_size < 1024*1024:
+            size_display = f"{total_size/1024:.2f} KB"
+        else:
+            size_display = f"{total_size/(1024*1024):.2f} MB"
+        
         summary = {
             "analysis_type": "disk_image",
             "input_file": filepath,
-            "total_size_mb": f"{total_size / (1024*1024):.2f}",
+            "total_size": size_display,
             "files_scanned": total_files,
             "directories_scanned": total_dirs,
-            "status": "completed",
-            "results": file_list
+            "status": "completed"
         }
+        
+        # Add system intelligence if available
+        if 'system_intelligence' in analysis_data:
+            summary['system_intelligence'] = analysis_data['system_intelligence']
+        
+        # Add YARA detection summary at the top if available
+        if 'yara_detection' in analysis_data:
+            summary['yara_detection'] = analysis_data['yara_detection']
+        
+        # Add detailed results at the end
+        summary['results'] = file_list
     
-    print_output(summary)
+    print_output(summary, format_type=output)
 
 if __name__ == '__main__':
     cli()

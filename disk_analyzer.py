@@ -4,6 +4,7 @@ import pytsk3
 import logging
 from filesystem_parser import extract_file_metadata, open_filesystem
 from yara_scanner import scan_files
+from system_intelligence import extract_system_intelligence
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,13 @@ def analyze_disk_image(image_path, quick_mode=False, yara_rules_path=None):
             fs, _ = open_filesystem(img)
             
             if fs:
-                result['results'] = scan_files(fs, result['results'], yara_rules_path)
+                # Extract system intelligence
+                system_info = extract_system_intelligence(fs, result['results'])
+                result['system_intelligence'] = system_info
+                
+                # Run YARA scanning
+                result['results'], yara_summary = scan_files(fs, result['results'], yara_rules_path)
+                result['yara_detection'] = yara_summary
             else:
                 logger.warning("Cannot open filesystem for YARA scanning")
                 

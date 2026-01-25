@@ -90,16 +90,17 @@ def scan_files(fs, file_list, yara_rules_path=None):
         yara_rules_path: Path to YARA rules
         
     Returns:
-        list: Updated file list with YARA results
+        tuple: (Updated file list with YARA results, YARA summary dict)
     """
     yara_rules = compile_yara_rules(yara_rules_path)
     if not yara_rules:
         logger.warning("YARA rules not compiled, skipping scan")
-        return file_list
+        return file_list, None
     
     logger.info("Starting YARA file scanning...")
     scanned_count = 0
     match_count = 0
+    detections = []
     
     for item in file_list:
         if item['type'] == 'file' and item['size'] > 0:
@@ -113,10 +114,27 @@ def scan_files(fs, file_list, yara_rules_path=None):
                     item['yara_matches'] = matches
                     match_count += 1
                     logger.info(f"YARA MATCH: {item['path']} -> {', '.join(matches)}")
+                    
+                    # Build detection summary
+                    for rule_name in matches:
+                        detections.append({
+                            'file': item['path'],
+                            'rule': rule_name,
+                            'size': item['size']
+                        })
                 
             except Exception as e:
                 item['yara_error'] = f"Error during YARA scan: {str(e)}"
                 logger.warning(f"YARA error for {item['path']}: {e}")
     
     logger.info(f"YARA scan complete: {scanned_count} files, {match_count} matches")
-    return file_list
+    
+    # Create summary
+    summary = {
+        'total_files_scanned': scanned_count,
+        'files_with_matches': match_count,
+        'total_detections': len(detections),
+        'detections': detections
+    }
+    
+    return file_list, summary

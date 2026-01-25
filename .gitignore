@@ -1,3 +1,6 @@
 /not_working_disks
 muj_disk.img
-ubnist1.gen3.raw
+ubnist1.gen3.rawsample_disks/*.dd
+forensic_images/
+output.json
+__pycache__/

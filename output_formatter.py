@@ -93,11 +93,52 @@ def format_table(data):
                 output.append(f"OS Version: {os_details['version']}")
         
         if sys_info.get('user_profiles'):
-            output.append(f"User Profiles: {len(sys_info['user_profiles'])}")
-            for user in sys_info['user_profiles']:
-                output.append(f"  • {user}")
+            users = sys_info['user_profiles']
+            output.append(f"User Profiles: {len(users)} found")
+            for user in users:
+                output.append(f"  - {user}")
         else:
             output.append("User Profiles: None detected")
+        
+        output.append("")
+    
+    # Print command history if available
+    if 'system_intelligence' in data and data['system_intelligence'].get('command_history'):
+        cmd_history = data['system_intelligence']['command_history']
+        cmd_analysis = data['system_intelligence'].get('command_analysis', {})
+        
+        output.append("-" * 110)
+        output.append("COMMAND HISTORY ANALYSIS")
+        output.append("-" * 110)
+        
+        output.append(f"Users with History: {len(cmd_history)}")
+        output.append(f"Total Commands: {cmd_analysis.get('total_commands', 0)}")
+        output.append("")
+        
+        # Show per-user summary
+        for user, data_user in cmd_history.items():
+            output.append(f"{user}:")
+            output.append(f"  Total commands: {data_user['total_commands']}")
+            output.append(f"  History files: {len(data_user['files'])}")
+            for hist_file in data_user['files']:
+                output.append(f"    - {hist_file['filename']}: {hist_file['command_count']} commands")
+        
+        output.append("")
+        
+        # Show interesting findings
+        if cmd_analysis.get('suspicious_commands'):
+            output.append("Suspicious Commands Detected:")
+            for item in cmd_analysis['suspicious_commands'][:5]:  # Show top 5
+                output.append(f"  [{item['user']}] {item['command']}")
+            if len(cmd_analysis['suspicious_commands']) > 5:
+                output.append(f"  ... and {len(cmd_analysis['suspicious_commands']) - 5} more")
+            output.append("")
+        
+        if cmd_analysis.get('most_common'):
+            output.append("Most Common Commands:")
+            for item in cmd_analysis['most_common'][:5]:  # Show top 5
+                output.append(f"  {item['command']}: {item['count']} times")
+            output.append("")
         
         output.append("")
     

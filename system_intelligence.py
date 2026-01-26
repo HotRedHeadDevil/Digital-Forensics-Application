@@ -301,6 +301,199 @@ def extract_os_version_macos(fs):
     return os_info
 
 
+def extract_command_history(fs, file_list, os_type, user_profiles):
+    """Extract command history from shell history files.
+    
+    Args:
+        fs: PyTSK3 FS_Info object
+        file_list: List of file metadata dictionaries
+        os_type: Detected OS type
+        user_profiles: List of user profile names
+        
+    Returns:
+        dict: Command history organized by user
+    """
+    history_data = {}
+    
+    # Define history file patterns based on OS
+    if os_type == 'linux' or os_type == 'macos':
+        history_files = ['.bash_history', '.zsh_history', '.history', '.sh_history']
+    elif os_type == 'windows':
+        # PowerShell history location
+        history_files = ['ConsoleHost_history.txt']
+    else:
+        return history_data
+    
+    # Search for history files in user directories
+    for item in file_list:
+        if item['type'] != 'file':
+            continue
+        
+        filename = item['name']
+        path = item['path']
+        
+        # Check if this is a history file
+        if filename not in history_files:
+            continue
+        
+        # Determine which user this belongs to
+        user = None
+        for username in user_profiles:
+            if os_type == 'windows':
+                if f'/Users/{username}/' in path or f'/Users/{username}\\' in path:
+                    user = username
+                    break
+            else:
+                if f'/home/{username}/' in path:
+                    user = username
+                    break
+        
+        if not user:
+            continue
+        
+        # Read and parse the history file
+        try:
+            file_obj = fs.open(path)
+            if file_obj and file_obj.info.meta.size > 0:
+                # Read up to 1MB of history
+                size_to_read = min(file_obj.info.meta.size, 1024 * 1024)
+                content = file_obj.read_random(0, size_to_read)
+                text = content.decode('utf-8', errors='ignore')
+                
+                # Parse commands (each line is typically a command)
+                commands = []
+                for line in text.split('\n'):
+                    line = line.strip()
+                    if line and not line.startswith('#'):  # Skip comments
+                        commands.append(line)
+                
+                if commands:
+                    if user not in history_data:
+                        history_data[user] = {
+                            'files': [],
+                            'commands': [],
+                            'total_commands': 0
+                        }
+                    
+                    history_data[user]['files'].append({
+                        'path': path,
+                        'filename': filename,
+                        'command_count': len(commands)
+                    })
+                    history_data[user]['commands'].extend(commands)
+                    history_data[user]['total_commands'] += len(commands)
+                    
+                    logger.info(f"Found {len(commands)} commands in {path}")
+                    
+        except Exception as e:
+            logger.debug(f"Could not read history file {path}: {e}")
+    
+    return history_data
+
+
+def analyze_command_history(history_data):
+    """Analyze command history for interesting patterns.
+    
+    Args:
+        history_data: Command history organized by user
+        
+    Returns:
+        dict: Analysis results
+    """
+    analysis = {
+        'total_users_with_history': len(history_data),
+        'total_commands': 0,
+        'suspicious_commands': [],
+        'network_commands': [],
+        'file_operations': [],
+        'most_common': []
+    }
+    
+    # Patterns for suspicious activities
+    suspicious_patterns = [
+        r'\b(wget|curl)\s+http',
+        r'\bssh\s+',
+        r'\bmysql\s+',
+        r'\bsu\s+',
+        r'\bsudo\s+',
+        r'\bnc\s+',
+        r'\bnetcat\s+',
+        r'\bbase64\s+',
+        r'\bchmod\s+777',
+        r'\brm\s+-rf\s+/',
+        # Windows PowerShell suspicious patterns
+        r'Invoke-WebRequest',
+        r'Invoke-Expression',
+        r'IEX\s+',
+        r'DownloadString',
+        r'DownloadFile',
+        r'-ExecutionPolicy\s+Bypass',
+        r'-EncodedCommand',
+        r'Start-Process.*-Verb\s+RunAs',
+        r'net\s+user.*password',
+        r'reg\s+add',
+        r'reg\s+delete',
+        r'Get-Credential',
+        r'ConvertTo-SecureString',
+    ]
+    
+    network_patterns = [
+        r'\b(ssh|scp|ftp|telnet|nc|netcat)\b',
+        r'\b(wget|curl)\b',
+        r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'  # IP addresses
+    ]
+    
+    file_op_patterns = [
+        r'\b(rm|mv|cp|mkdir|touch|chmod|chown)\b'
+    ]
+    
+    command_freq = {}
+    
+    for user, data in history_data.items():
+        for cmd in data['commands']:
+            analysis['total_commands'] += 1
+            
+            # Get first word (command name)
+            cmd_name = cmd.split()[0] if cmd.split() else cmd
+            command_freq[cmd_name] = command_freq.get(cmd_name, 0) + 1
+            
+            # Check for suspicious patterns
+            for pattern in suspicious_patterns:
+                if re.search(pattern, cmd, re.IGNORECASE):
+                    analysis['suspicious_commands'].append({
+                        'user': user,
+                        'command': cmd[:100]  # Truncate long commands
+                    })
+                    break
+            
+            # Check for network commands
+            for pattern in network_patterns:
+                if re.search(pattern, cmd, re.IGNORECASE):
+                    analysis['network_commands'].append({
+                        'user': user,
+                        'command': cmd[:100]
+                    })
+                    break
+            
+            # Check for file operations
+            for pattern in file_op_patterns:
+                if re.search(pattern, cmd, re.IGNORECASE):
+                    analysis['file_operations'].append({
+                        'user': user,
+                        'command': cmd[:100]
+                    })
+                    break
+    
+    # Get most common commands (top 10)
+    sorted_commands = sorted(command_freq.items(), key=lambda x: x[1], reverse=True)
+    analysis['most_common'] = [
+        {'command': cmd, 'count': count}
+        for cmd, count in sorted_commands[:10]
+    ]
+    
+    return analysis
+
+
 def extract_system_intelligence(fs, file_list):
     """Extract system information and user profiles from filesystem.
     
@@ -317,7 +510,9 @@ def extract_system_intelligence(fs, file_list):
         'os_type': None,
         'hostname': None,
         'os_info': {},
-        'user_profiles': []
+        'user_profiles': [],
+        'command_history': {},
+        'command_analysis': {}
     }
     
     # Detect OS type
@@ -339,6 +534,16 @@ def extract_system_intelligence(fs, file_list):
         intelligence['hostname'] = extract_hostname_linux(fs)  # macOS also uses /etc/hostname
         intelligence['os_info'] = extract_os_version_macos(fs)
         intelligence['user_profiles'] = enumerate_user_profiles_macos(fs, file_list)
+    
+    # Extract command history if users were found
+    if intelligence['user_profiles']:
+        logger.info("Extracting command history...")
+        history_data = extract_command_history(fs, file_list, os_type, intelligence['user_profiles'])
+        intelligence['command_history'] = history_data
+        
+        if history_data:
+            intelligence['command_analysis'] = analyze_command_history(history_data)
+            logger.info(f"Found command history for {len(history_data)} users")
     
     # Log summary
     logger.info(f"System intelligence summary: OS={os_type}, Users={len(intelligence['user_profiles'])}")

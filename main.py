@@ -3,6 +3,7 @@ import json
 import os
 import logging
 from disk_analyzer import analyze_disk_image
+from memory_analyzer import analyze_memory_dump
 from validators import validate_image_file, validate_yara_rules, validate_output_format
 from output_formatter import format_output
 
@@ -36,22 +37,47 @@ def cli(verbose):
 
 @cli.command()
 @click.argument('filepath', type=click.Path(exists=True))
-def memory(filepath):
-    """Performs basic analysis of memory dump.
+@click.option('--os-type', type=click.Choice(['windows', 'linux'], case_sensitive=False),
+              help='Operating system type (auto-detected if not specified)')
+@click.option('--output', '-o', type=click.Choice(['json', 'csv', 'table'], case_sensitive=False),
+              default='json', help='Output format (default: json)')
+def memory(filepath, os_type, output):
+    """Performs analysis of memory dump using Volatility 3.
     
-    FILEPATH: Path to memory dump file.
+    FILEPATH: Path to memory dump file (.raw, .mem, .dmp, .vmem, etc.)
     """
     click.echo(f"Analyzing memory dump: {os.path.basename(filepath)}")
     
-    results = {
-        "analysis_type": "memory_dump",
-        "input_file": filepath,
-        "size": f"{os.path.getsize(filepath) / (1024*1024):.2f} MB",
-        "status": "not_implemented",
-        "note": "Awaiting Volatility integration."
-    }
+    # Analyze memory dump
+    analysis_data = analyze_memory_dump(filepath, os_type=os_type.lower() if os_type else None)
     
-    print_output(results)
+    if "error" in analysis_data:
+        summary = {
+            "analysis_type": "memory_dump",
+            "input_file": filepath,
+            "file_size_mb": analysis_data.get('file_size_mb', 0),
+            "status": "error",
+            "error": analysis_data["error"]
+        }
+    else:
+        summary = {
+            "analysis_type": "memory_dump",
+            "input_file": filepath,
+            "file_size_mb": analysis_data.get('file_size_mb', 0),
+            "os_type": analysis_data.get('os_type', 'unknown'),
+            "status": "completed",
+            "process_count": len(analysis_data.get('processes', [])),
+            "network_connections": len(analysis_data.get('network_connections', [])),
+            "suspicious_processes": len(analysis_data.get('suspicious_processes', [])),
+            "suspicious_items": len(analysis_data.get('suspicious_items', [])),
+            "processes": analysis_data.get('processes', []),
+            "network": analysis_data.get('network_connections', []),
+            "suspicious": analysis_data.get('suspicious_processes', []),
+            "suspicious_findings": analysis_data.get('suspicious_items', []),
+            "modules": analysis_data.get('loaded_modules', [])
+        }
+    
+    print_output(summary, format_type=output)
 
 @cli.command()
 @click.argument('filepath', type=click.Path(exists=True))

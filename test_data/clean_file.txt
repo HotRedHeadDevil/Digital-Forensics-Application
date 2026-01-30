@@ -1,3 +1,0 @@
-This is a clean file.
-It contains no suspicious content.
-Just some normal text for testing.

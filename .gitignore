@@ -16,12 +16,13 @@ env/
 .DS_Store
 Thumbs.db
 
+# Local files not for GitHub
+.local_only/
+
 # Forensic test images and data
 /not_working_disks
 forensic_images/
 sample_disks/*.dd
-muj_disk.img
-ubnist1.gen3.raw
 
 # Generated output files
 output.json

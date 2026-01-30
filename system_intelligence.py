@@ -411,16 +411,67 @@ def analyze_command_history(history_data):
     
     # Patterns for suspicious activities
     suspicious_patterns = [
+        # Download/Exfiltration
         r'\b(wget|curl)\s+http',
-        r'\bssh\s+',
-        r'\bmysql\s+',
-        r'\bsu\s+',
-        r'\bsudo\s+',
+        r'\brsync\s+',
+        r'\bscp\s+.*@',
+        r'\bftp\s+',
         r'\bnc\s+',
         r'\bnetcat\s+',
+        
+        # Remote Access
+        r'\bssh\s+',
+        r'\btelnet\s+',
+        
+        # Database Access
+        r'\bmysql\s+',
+        r'\bpsql\s+',
+        r'\bsqlite3\s+',
+        
+        # Privilege Escalation
+        r'\bsu\s+',
+        r'\bsudo\s+',
+        r'\bpkexec\s+',
+        r'\bchmod\s+[4567]\d\d\d',  # SUID/SGID bits
+        r'\bchmod\s+\+s\b',
+        
+        # Encoding/Obfuscation
         r'\bbase64\s+',
+        r'\bxxd\s+',
+        r'\bopenssl\s+enc',
+        
+        # Dangerous Operations
         r'\bchmod\s+777',
         r'\brm\s+-rf\s+/',
+        r'\bdd\s+if=',
+        r'\bmkfs\.',
+        
+        # History Manipulation
+        r'history\s+-c',
+        r'export\s+HISTFILE',
+        r'unset\s+HISTFILE',
+        r'shred\s+.*history',
+        
+        # Credential Access
+        r'cat\s+/etc/shadow',
+        r'cat\s+/etc/passwd',
+        r'grep\s+.*password',
+        r'grep\s+.*passwd',
+        
+        # Persistence
+        r'\bcrontab\s+',
+        r'\bsystemctl\s+(enable|start)',
+        r'\bchkconfig\s+',
+        r'\.bashrc',
+        r'\.bash_profile',
+        
+        # Compilation (potentially malicious)
+        r'\bgcc\s+',
+        r'\bmake\s+',
+        r'python\s+-c\s+',
+        r'perl\s+-e\s+',
+        r'ruby\s+-e\s+',
+        
         # Windows PowerShell suspicious patterns
         r'Invoke-WebRequest',
         r'Invoke-Expression',
@@ -429,12 +480,37 @@ def analyze_command_history(history_data):
         r'DownloadFile',
         r'-ExecutionPolicy\s+Bypass',
         r'-EncodedCommand',
+        r'-enc\s+',
+        r'FromBase64String',
         r'Start-Process.*-Verb\s+RunAs',
+        r'Start-Process.*-WindowStyle\s+Hidden',
+        
+        # Windows Credentials
         r'net\s+user.*password',
-        r'reg\s+add',
-        r'reg\s+delete',
         r'Get-Credential',
         r'ConvertTo-SecureString',
+        r'mimikatz',
+        r'sekurlsa',
+        
+        # Windows Registry
+        r'reg\s+add',
+        r'reg\s+delete',
+        r'reg\s+query.*password',
+        r'Get-ItemProperty.*HKLM',
+        r'Set-ItemProperty.*HKLM',
+        
+        # Windows Lateral Movement
+        r'psexec',
+        r'wmic\s+',
+        r'Enter-PSSession',
+        r'Invoke-Command.*-ComputerName',
+        
+        # Windows Discovery
+        r'Get-Process',
+        r'Get-Service',
+        r'Get-NetTCPConnection',
+        r'Get-NetIPAddress',
+        r'whoami\s+/priv',
     ]
     
     network_patterns = [

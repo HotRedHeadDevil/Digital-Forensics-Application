@@ -10,6 +10,9 @@ SKIP_DIRS = ['.', '..']
 SYSTEM_FILES = ['$MBR', '$FAT1', '$FAT2', '$OrphanFiles']
 DEFAULT_SECTOR_SIZE = 512
 
+# Track if we've already shown the partition warning for this run
+_partition_warning_shown = False
+
 
 def open_filesystem(img):
     """Detects partition offset and opens filesystem.
@@ -20,6 +23,8 @@ def open_filesystem(img):
     Returns:
         tuple: (pytsk3.FS_Info, offset) or (None, None) on error
     """
+    global _partition_warning_shown
+    
     offset = 0
     VS_CLASSES = [
         getattr(pytsk3, 'VS_Info', None),
@@ -48,7 +53,11 @@ def open_filesystem(img):
                         continue
         
         except Exception as e:
-            logger.warning(f"Partition detection failed: {e}")
+            # Only show warning once per run
+            if not _partition_warning_shown:
+                logger.warning(f"No partition table found - analyzing as raw partition image (this is normal for .dd files)")
+                logger.debug(f"Partition detection details: {e}")
+                _partition_warning_shown = True
 
     if offset == 0:
         logger.info("Attempting to open FS at offset 0 (assuming partition image).")

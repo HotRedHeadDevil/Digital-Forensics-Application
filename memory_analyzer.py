@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 try:
     from volatility3 import framework
     from volatility3.framework import contexts, automagic, plugins, constants
+    
+    # Configure Volatility logging to reduce duplicate warnings
+    vol_logger = logging.getLogger('volatility3')
+    vol_logger.setLevel(logging.ERROR)  # Only show errors from Volatility, not warnings
+    
 except ImportError:
     logger.error("Volatility 3 not installed. Run: pip install volatility3")
     raise

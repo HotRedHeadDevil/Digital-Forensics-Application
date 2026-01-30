@@ -1,6 +1,40 @@
-/not_working_disks
-muj_disk.img
-ubnist1.gen3.rawsample_disks/*.dd
-forensic_images/
-output.json
+# Build and environment
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+env/
+.Python
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Forensic test images and data
+/not_working_disks
+forensic_images/
+sample_disks/*.dd
+muj_disk.img
+ubnist1.gen3.raw
+
+# Generated output files
+output.json
+output_linux.json
+infected_analysis_results.json
+*.json
+test_output.json
+TESTING_CHECKLIST.md
+*.log
+*.csv
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/

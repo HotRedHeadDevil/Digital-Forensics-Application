@@ -1,0 +1,10 @@
+Windows Command History
+======================
+
+C:\> cmd.exe /c whoami
+C:\> powershell -ExecutionPolicy Bypass
+C:\> net user administrator P@ssw0rd
+C:\> taskkill /F /IM notepad.exe
+C:\> reg add HKLM\Software\Test /v TestValue /d 1
+
+Commands executed: 5

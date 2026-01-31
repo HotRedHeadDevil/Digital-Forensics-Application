@@ -190,10 +190,23 @@ def analyze_windows_memory(memory_file):
     Returns:
         dict: Analysis results
     """
+    from collections import defaultdict
+    
     results = {
         'os_type': 'windows',
+        'hostname': None,
+        'logged_in_users': [],
         'processes': [],
         'network_connections': [],
+        'network_statistics': {
+            'total_connections': 0,
+            'established_connections': 0,
+            'listening_ports': 0,
+            'ip_frequency': {},
+            'port_frequency': {},
+            'top_remote_ips': [],
+            'top_local_ports': []
+        },
         'suspicious_processes': [],
         'suspicious_items': [],  # For network-based and other suspicious findings
         'loaded_modules': []
@@ -204,38 +217,233 @@ def analyze_windows_memory(memory_file):
         return {'error': 'Failed to initialize Volatility context'}
     
     try:
+        # Extract system info (hostname, OS version)
+        logger.info("Extracting system information...")
+        from volatility3.plugins.windows import info
+        plugin = plugins.construct_plugin(ctx, automagics, info.Info, 'plugins', None, None)
+        treegrid = plugin.run()
+        
+        if hasattr(treegrid, '_generator'):
+            for level, item in treegrid._generator:
+                # Info plugin typically returns key-value pairs
+                # Look for ComputerName or similar fields
+                if len(item) >= 2:
+                    key = str(clean_value(item[0])) if item[0] else ''
+                    value = str(clean_value(item[1])) if item[1] else ''
+                    
+                    if 'computername' in key.lower() or 'hostname' in key.lower():
+                        results['hostname'] = value
+                        logger.info(f"Found hostname: {value}")
+        
+    except Exception as e:
+        logger.debug(f"System info extraction failed: {e}")
+    
+    try:
+        # Extract logged-in users (Windows Sessions)
+        logger.info("Extracting user sessions...")
+        from volatility3.plugins.windows import sessions
+        import re
+        
+        plugin = plugins.construct_plugin(ctx, automagics, sessions.Sessions, 'plugins', None, None)
+        treegrid = plugin.run()
+        
+        user_set = set()
+        if hasattr(treegrid, '_generator'):
+            for level, item in treegrid._generator:
+                # Sessions columns typically include Username
+                # Extract username if available
+                if len(item) > 0:
+                    for field in item:
+                        field_str = str(clean_value(field))
+                        
+                        # Skip empty, None, or null values
+                        if not field_str or field_str in ['None', 'N/A', '', 'null']:
+                            continue
+                        
+                        # Skip hex addresses (start with 0x)
+                        if field_str.startswith('0x'):
+                            continue
+                        
+                        # Skip pure numbers (PIDs, etc.)
+                        if field_str.isdigit():
+                            continue
+                        
+                        # Skip timestamps (contains date/time patterns)
+                        if re.match(r'\d{4}-\d{2}-\d{2}', field_str):  # ISO date format
+                            continue
+                        
+                        # Skip process names (ends with .exe, .ex, or has period at end)
+                        if field_str.endswith('.exe') or field_str.endswith('.ex') or field_str.endswith('.'):
+                            continue
+                        
+                        # Skip strings that look like truncated process names (mixed case with capitals in middle)
+                        # e.g., SearchFilterHo, VGAuthService
+                        if re.search(r'[a-z][A-Z]', field_str):  # camelCase or mixed case
+                            continue
+                        
+                        # Accept only valid username patterns:
+                        # 1. DOMAIN\username format (e.g., NT AUTHORITY\LOCAL SERVICE)
+                        # 2. MACHINE/user format (e.g., WIN-PC/hacker)
+                        # 3. Well-known system accounts: System, Console
+                        # 4. Simple usernames starting with letter
+                        
+                        if '\\' in field_str:
+                            # DOMAIN\username format - validate it has letters and spaces/uppercase
+                            if re.search(r'[a-zA-Z]', field_str):
+                                user_set.add(field_str)
+                        elif '/' in field_str and re.search(r'[a-zA-Z]', field_str):
+                            # WORKGROUP/MACHINE$ or MACHINE/username format
+                            user_set.add(field_str)
+                        elif field_str in ['System', 'Console']:
+                            # Well-known system accounts
+                            user_set.add(field_str)
+                        elif re.match(r'^[a-zA-Z][a-zA-Z0-9_\-@]+$', field_str) and len(field_str) <= 30:
+                            # Simple username: starts with letter, alphanumeric + _ - @, no periods
+                            # Reduced length to 30 to avoid service names
+                            user_set.add(field_str)
+        
+        results['logged_in_users'] = sorted(list(user_set))
+        if results['logged_in_users']:
+            logger.info(f"Found {len(results['logged_in_users'])} logged-in users")
+        
+    except Exception as e:
+        logger.debug(f"User session extraction not available: {e}")
+    
+    try:
         # Process list
         logger.info("Extracting process list...")
         from volatility3.plugins.windows import pslist
         plugin = plugins.construct_plugin(ctx, automagics, pslist.PsList, 'plugins', None, None)
         treegrid = plugin.run()
         
+        # Get column names from TreeGrid
+        column_names = [col.name for col in treegrid.columns]
+        logger.debug(f"PsList columns: {column_names}")
+        
         if hasattr(treegrid, '_generator'):
             for level, item in treegrid._generator:
-                # PsList columns: Offset, PID, PPID, ImageFileName, Offset(s), Threads, Handles, SessionId, Wow64, CreateTime, ExitTime
-                # Note: TreeGrid format seems to be [Offset, ImageFileName, Offset(s), PID, PPID, Threads, Handles...]
-                # Let's map them correctly based on actual output
-                name = str(clean_value(item[1])) if len(item) > 1 else 'Unknown'  # ImageFileName is at index 1
-                pid = clean_value(item[3]) if len(item) > 3 else 0  # PID at index 3
-                ppid = clean_value(item[4]) if len(item) > 4 else 0  # PPID at index 4
-                threads = clean_value(item[5]) if len(item) > 5 else 0
-                handles = clean_value(item[6]) if len(item) > 6 else 0
+                # Map columns by name instead of hardcoded indices
+                row_dict = {}
+                for i, col_name in enumerate(column_names):
+                    if i < len(item):
+                        row_dict[col_name] = clean_value(item[i])
                 
+                # Extract process info using column names
                 process_info = {
-                    'pid': pid,
-                    'ppid': ppid,
-                    'name': name,
-                    'threads': threads,
-                    'handles': handles
+                    'pid': row_dict.get('PID', 0),
+                    'ppid': row_dict.get('PPID', 0),
+                    'name': str(row_dict.get('ImageFileName', 'Unknown')),
+                    'threads': row_dict.get('Threads', 0),
+                    'handles': row_dict.get('Handles', 0)
                 }
                 results['processes'].append(process_info)
                 
                 # Flag suspicious processes
-                name_lower = str(name).lower() if name else ''
+                name_lower = process_info['name'].lower() if process_info['name'] else ''
                 if any(sus in name_lower for sus in ['cmd.exe', 'powershell', 'wscript', 'mshta', 'nc.exe', 'mimikatz']):
                     results['suspicious_processes'].append(process_info)
         
         logger.info(f"Found {len(results['processes'])} processes")
+        
+    except Exception as e:
+        logger.error(f"Process list extraction failed: {e}")
+    
+    try:
+        # Network connections
+        logger.info("Extracting network connections...")
+        from volatility3.plugins.windows import netscan
+        from collections import defaultdict
+        
+        plugin = plugins.construct_plugin(ctx, automagics, netscan.NetScan, 'plugins', None, None)
+        treegrid = plugin.run()
+        
+        suspicious_pids = set()  # Track PIDs with suspicious network activity
+        ip_freq = defaultdict(int)
+        port_freq = defaultdict(int)
+        established_count = 0
+        listening_count = 0
+        
+        if hasattr(treegrid, '_generator'):
+            for level, item in treegrid._generator:
+                # NetScan columns: Offset, Proto, LocalAddr, LocalPort, ForeignAddr, ForeignPort, State, PID, Owner, Created
+                conn_info = {
+                    'protocol': str(clean_value(item[1])) if len(item) > 1 else 'Unknown',
+                    'local_addr': str(clean_value(item[2])) if len(item) > 2 else '',
+                    'local_port': clean_value(item[3]) if len(item) > 3 else 0,
+                    'foreign_addr': str(clean_value(item[4])) if len(item) > 4 else '',
+                    'foreign_port': clean_value(item[5]) if len(item) > 5 else 0,
+                    'state': str(clean_value(item[6])) if len(item) > 6 else '',
+                    'pid': clean_value(item[7]) if len(item) > 7 else 0,
+                    'owner': str(clean_value(item[8])) if len(item) > 8 else ''
+                }
+                results['network_connections'].append(conn_info)
+                
+                # Track statistics
+                state = conn_info['state'].upper() if conn_info['state'] else ''
+                if 'ESTABLISHED' in state:
+                    established_count += 1
+                elif 'LISTENING' in state or 'LISTEN' in state:
+                    listening_count += 1
+                
+                # Count IP addresses (remote)
+                foreign_addr = conn_info['foreign_addr']
+                if foreign_addr and foreign_addr not in ['', '0.0.0.0', '*', '::', '-', 'None', '0', 'N/A']:
+                    ip_freq[foreign_addr] += 1
+                
+                # Count ports (local listening ports and remote ports)
+                local_port = conn_info['local_port']
+                if local_port and local_port > 0:
+                    if 'LISTENING' in state or 'LISTEN' in state:
+                        port_freq[local_port] += 1
+                
+                foreign_port = conn_info['foreign_port']
+                if foreign_port and foreign_port > 0:
+                    port_freq[foreign_port] += 1
+                
+                # Flag suspicious connections and track their PIDs
+                if foreign_addr not in ['', '0.0.0.0', '*', '::', '-', 'None'] and foreign_port:
+                    # Flag connections to unusual ports (not common HTTP, HTTPS, DNS, etc.)
+                    if foreign_port not in [80, 443, 53, 8080, 8443]:
+                        suspicious_pids.add(conn_info['pid'])
+                        results['suspicious_items'].append({
+                            'type': 'network',
+                            'pid': conn_info['pid'],
+                            'remote': f"{foreign_addr}:{foreign_port}",
+                            'reason': 'Unusual port connection'
+                        })
+        
+        # Compile network statistics
+        results['network_statistics']['total_connections'] = len(results['network_connections'])
+        results['network_statistics']['established_connections'] = established_count
+        results['network_statistics']['listening_ports'] = listening_count
+        
+        # Convert defaultdicts to regular dicts and get top IPs/ports
+        results['network_statistics']['ip_frequency'] = dict(ip_freq)
+        results['network_statistics']['port_frequency'] = dict(port_freq)
+        
+        # Top 10 remote IPs
+        sorted_ips = sorted(ip_freq.items(), key=lambda x: x[1], reverse=True)[:10]
+        results['network_statistics']['top_remote_ips'] = [
+            {'ip': ip, 'connection_count': count} for ip, count in sorted_ips
+        ]
+        
+        # Top 10 ports
+        sorted_ports = sorted(port_freq.items(), key=lambda x: x[1], reverse=True)[:10]
+        results['network_statistics']['top_local_ports'] = [
+            {'port': port, 'usage_count': count} for port, count in sorted_ports
+        ]
+        
+        # Flag processes with suspicious network activity
+        for proc in results['processes']:
+            if proc['pid'] in suspicious_pids:
+                # Check if not already in suspicious list (compare by PID)
+                if not any(p['pid'] == proc['pid'] for p in results['suspicious_processes']):
+                    results['suspicious_processes'].append(proc)
+        
+        logger.info(f"Found {len(results['network_connections'])} network connections")
+        logger.info(f"Network stats: {established_count} established, {listening_count} listening")
+        logger.info(f"Unique IPs: {len(ip_freq)}, Unique ports: {len(port_freq)}")
+        logger.info(f"Flagged {len(suspicious_pids)} PIDs with suspicious network activity")
         
     except Exception as e:
         logger.error(f"Process list extraction failed: {e}")

@@ -180,6 +180,341 @@ def format_memory_table(data):
     return '\n'.join(output)
 
 
+def format_eventlog_table(data):
+    """Format event log analysis as ASCII table.
+    
+    Args:
+        data: Dictionary containing event log analysis results
+        
+    Returns:
+        str: ASCII table formatted string
+    """
+    output = []
+    
+    # Print summary section
+    output.append("=" * 110)
+    output.append("EVENT LOG ANALYSIS SUMMARY")
+    output.append("=" * 110)
+    output.append(f"Input File: {data.get('input_file', 'N/A')}")
+    output.append(f"Log Type: {data.get('log_type', 'Unknown')}")
+    output.append(f"File Size: {data.get('file_size_mb', 0):.2f} MB")
+    output.append(f"Status: {data.get('status', 'N/A')}")
+    
+    if data.get('status') == 'error':
+        output.append(f"\nError: {data.get('error', 'Unknown error')}")
+        output.append("=" * 110)
+        return '\n'.join(output)
+    
+    output.append(f"Total Events: {data.get('total_events', 0):,}")
+    output.append(f"Events Parsed: {data.get('events_parsed', 0):,}")
+    output.append("")
+    
+    # Print security alerts if any
+    if 'security_alerts' in data:
+        alerts = data['security_alerts']
+        critical_count = alerts.get('critical_count', 0)
+        warning_count = alerts.get('warning_count', 0)
+        info_count = alerts.get('info_count', 0)
+        
+        if critical_count > 0 or warning_count > 0:
+            output.append("-" * 110)
+            output.append("SECURITY ALERTS")
+            output.append("-" * 110)
+            output.append(f"Critical Alerts: {critical_count}")
+            output.append(f"Warnings: {warning_count}")
+            output.append(f"Info: {info_count}")
+            output.append("")
+            
+            # Show critical alerts
+            if alerts.get('critical'):
+                output.append("CRITICAL:")
+                for alert in alerts['critical']:
+                    output.append(f"  [!] {alert.get('type', 'unknown').upper()}: {alert.get('message', '')}")
+                    if 'details' in alert:
+                        details = alert['details']
+                        for key, value in details.items():
+                            if isinstance(value, list):
+                                value = ', '.join(str(v) for v in value)
+                            output.append(f"      {key}: {value}")
+                output.append("")
+            
+            # Show warnings
+            if alerts.get('warnings'):
+                output.append("WARNINGS:")
+                for alert in alerts['warnings'][:10]:  # Limit to 10
+                    output.append(f"  [WARNING] {alert.get('type', 'unknown').upper()}: {alert.get('message', '')}")
+                    if 'details' in alert:
+                        details = alert['details']
+                        for key, value in list(details.items())[:3]:  # Limit details
+                            if isinstance(value, list):
+                                value = ', '.join(str(v) for v in value[:3])
+                            output.append(f"      {key}: {value}")
+                if len(alerts.get('warnings', [])) > 10:
+                    output.append(f"  ... and {len(alerts['warnings']) - 10} more warnings")
+                output.append("")
+    
+    # Print login events summary if any
+    if 'login_events' in data:
+        login = data['login_events']
+        output.append("-" * 110)
+        output.append("LOGIN EVENTS SUMMARY")
+        output.append("-" * 110)
+        output.append(f"Successful Logins: {login.get('successful_logins', 0)}")
+        output.append(f"Failed Logins: {login.get('failed_logins', 0)}")
+        output.append(f"Logoffs: {login.get('logoffs', 0)}")
+        output.append(f"Unique Users: {login.get('unique_users', 0)}")
+        output.append(f"Unique IPs: {login.get('unique_ips', 0)}")
+        output.append("")
+        
+        # Show top users
+        if login.get('top_users'):
+            output.append("TOP USERS:")
+            header = f"{'User':<50} {'Count':<10}"
+            output.append(header)
+            output.append("-" * 110)
+            for user_info in login['top_users'][:10]:
+                user = user_info.get('user', 'Unknown')[:49]
+                count = user_info.get('count', 0)
+                row = f"{user:<50} {count:<10}"
+                output.append(row)
+            output.append("")
+        
+        # Show top IPs
+        if login.get('top_ips'):
+            output.append("TOP SOURCE IPS:")
+            header = f"{'IP Address':<30} {'Count':<10}"
+            output.append(header)
+            output.append("-" * 110)
+            for ip_info in login['top_ips'][:10]:
+                ip = ip_info.get('ip', 'Unknown')[:29]
+                count = ip_info.get('count', 0)
+                row = f"{ip:<30} {count:<10}"
+                output.append(row)
+            output.append("")
+        
+        # Show recent failed logins
+        if login.get('details', {}).get('failed_logins'):
+            failed = login['details']['failed_logins']
+            if failed:
+                output.append("RECENT FAILED LOGIN ATTEMPTS:")
+                header = f"{'Timestamp':<28} {'User':<30} {'IP Address':<20} {'Reason':<30}"
+                output.append(header)
+                output.append("-" * 110)
+                for attempt in failed[:10]:  # Show last 10
+                    timestamp = str(attempt.get('timestamp', 'Unknown'))[:27]
+                    user = attempt.get('user', 'Unknown')[:29]
+                    ip = attempt.get('ip_address', '-')[:19]
+                    reason = attempt.get('failure_reason', '-')[:29]
+                    row = f"{timestamp:<28} {user:<30} {ip:<20} {reason:<30}"
+                    output.append(row)
+                if len(failed) > 10:
+                    output.append(f"\n... and {len(failed) - 10} more failed attempts")
+                output.append("")
+    
+    # Print system events if any
+    if 'system_events' in data:
+        sys_events = data['system_events']
+        output.append("-" * 110)
+        output.append("SYSTEM EVENTS SUMMARY")
+        output.append("-" * 110)
+        
+        if sys_events.get('errors'):
+            output.append(f"Errors: {len(sys_events['errors'])}")
+        if sys_events.get('warnings'):
+            output.append(f"Warnings: {len(sys_events['warnings'])}")
+        if sys_events.get('service_starts'):
+            output.append(f"Service Starts: {len(sys_events['service_starts'])}")
+        if sys_events.get('service_stops'):
+            output.append(f"Service Stops: {len(sys_events['service_stops'])}")
+        output.append("")
+    
+    output.append("=" * 110)
+    output.append("TIP: Use --output json for complete details including all login events and timestamps")
+    output.append("=" * 110)
+    
+    return '\n'.join(output)
+
+
+def format_textlog_table(data):
+    """Format text log analysis as ASCII table.
+    
+    Args:
+        data: Dictionary containing text log analysis results
+        
+    Returns:
+        str: ASCII table formatted string
+    """
+    output = []
+    
+    # Print summary section
+    output.append("=" * 110)
+    output.append("TEXT LOG ANALYSIS SUMMARY")
+    output.append("=" * 110)
+    output.append(f"Input File: {data.get('input_file', 'N/A')}")
+    output.append(f"Log Type: {data.get('log_type', 'Unknown').upper()}")
+    output.append(f"File Size: {data.get('file_size_mb', 0):.2f} MB")
+    output.append(f"Status: {data.get('status', 'N/A')}")
+    
+    if data.get('status') == 'error':
+        output.append(f"\nError: {data.get('error', 'Unknown error')}")
+        output.append("=" * 110)
+        return '\n'.join(output)
+    
+    output.append(f"Total Lines: {data.get('total_lines', 0):,}")
+    output.append(f"Lines Parsed: {data.get('lines_parsed', 0):,}")
+    output.append("")
+    
+    # Print security alerts if any
+    if 'security_alerts' in data:
+        alerts = data['security_alerts']
+        critical_count = alerts.get('critical_count', 0)
+        warning_count = alerts.get('warning_count', 0)
+        info_count = alerts.get('info_count', 0)
+        
+        if critical_count > 0 or warning_count > 0:
+            output.append("-" * 110)
+            output.append("SECURITY ALERTS")
+            output.append("-" * 110)
+            output.append(f"Critical Alerts: {critical_count}")
+            output.append(f"Warnings: {warning_count}")
+            output.append(f"Info: {info_count}")
+            output.append("")
+            
+            # Show critical alerts
+            if alerts.get('critical'):
+                output.append("CRITICAL:")
+                for alert in alerts['critical']:
+                    output.append(f"  [!] {alert.get('type', 'unknown').upper()}: {alert.get('message', '')}")
+                    if 'details' in alert:
+                        details = alert['details']
+                        for key, value in details.items():
+                            if isinstance(value, list):
+                                value = ', '.join(str(v) for v in value[:5])
+                            output.append(f"      {key}: {value}")
+                output.append("")
+            
+            # Show warnings
+            if alerts.get('warnings'):
+                output.append("WARNINGS:")
+                for alert in alerts['warnings'][:10]:
+                    output.append(f"  [WARNING] {alert.get('type', 'unknown').upper()}: {alert.get('message', '')}")
+                    if 'details' in alert:
+                        details = alert['details']
+                        for key, value in list(details.items())[:3]:
+                            if isinstance(value, list):
+                                value = ', '.join(str(v) for v in value[:5])
+                            output.append(f"      {key}: {value}")
+                if len(alerts.get('warnings', [])) > 10:
+                    output.append(f"  ... and {len(alerts['warnings']) - 10} more warnings")
+                output.append("")
+    
+    # Print login events summary if any
+    if 'login_events' in data:
+        login = data['login_events']
+        output.append("-" * 110)
+        output.append("LOGIN EVENTS SUMMARY")
+        output.append("-" * 110)
+        output.append(f"Successful Logins: {login.get('successful_logins', 0)}")
+        output.append(f"Failed Logins: {login.get('failed_logins', 0)}")
+        output.append(f"SSH Connections: {login.get('ssh_connections', 0)}")
+        output.append(f"Sudo Commands: {login.get('sudo_commands', 0)}")
+        output.append(f"Unique Users: {login.get('unique_users', 0)}")
+        output.append(f"Unique IPs: {login.get('unique_ips', 0)}")
+        output.append("")
+        
+        # Show top users
+        if login.get('top_users'):
+            output.append("TOP USERS:")
+            header = f"{'User':<30} {'Count':<10}"
+            output.append(header)
+            output.append("-" * 110)
+            for user_info in login['top_users'][:10]:
+                user = user_info.get('user', 'Unknown')[:29]
+                count = user_info.get('count', 0)
+                row = f"{user:<30} {count:<10}"
+                output.append(row)
+            output.append("")
+        
+        # Show top IPs
+        if login.get('top_ips'):
+            output.append("TOP SOURCE IPS:")
+            header = f"{'IP Address':<30} {'Count':<10}"
+            output.append(header)
+            output.append("-" * 110)
+            for ip_info in login['top_ips'][:10]:
+                ip = ip_info.get('ip', 'Unknown')[:29]
+                count = ip_info.get('count', 0)
+                row = f"{ip:<30} {count:<10}"
+                output.append(row)
+            output.append("")
+        
+        # Show recent failed logins
+        if login.get('details', {}).get('failed_logins'):
+            failed = login['details']['failed_logins']
+            if failed:
+                output.append("RECENT FAILED LOGIN ATTEMPTS:")
+                header = f"{'User':<20} {'IP Address':<20} {'Reason':<20}"
+                output.append(header)
+                output.append("-" * 110)
+                for attempt in failed[:15]:
+                    user = attempt.get('user', 'Unknown')[:19]
+                    ip = attempt.get('ip_address', '-')[:19]
+                    reason = attempt.get('reason', '-')[:19]
+                    row = f"{user:<20} {ip:<20} {reason:<20}"
+                    output.append(row)
+                if len(failed) > 15:
+                    output.append(f"\n... and {len(failed) - 15} more failed attempts")
+                output.append("")
+        
+        # Show sample sudo commands
+        if login.get('details', {}).get('sudo_commands'):
+            sudo = login['details']['sudo_commands']
+            if sudo:
+                output.append("SAMPLE SUDO COMMANDS:")
+                header = f"{'User':<20} {'Command':<85}"
+                output.append(header)
+                output.append("-" * 110)
+                for cmd in sudo[:10]:
+                    user = cmd.get('user', 'Unknown')[:19]
+                    command = cmd.get('command', '-')[:84]
+                    row = f"{user:<20} {command:<85}"
+                    output.append(row)
+                if len(sudo) > 10:
+                    output.append(f"\n... and {len(sudo) - 10} more sudo commands")
+                output.append("")
+    
+    # Print syslog events if any
+    if 'syslog_events' in data:
+        sys_events = data['syslog_events']
+        output.append("-" * 110)
+        output.append("SYSTEM LOG EVENTS SUMMARY")
+        output.append("-" * 110)
+        output.append(f"Service Starts: {sys_events.get('service_starts', 0)}")
+        output.append(f"Service Stops: {sys_events.get('service_stops', 0)}")
+        output.append(f"Errors: {sys_events.get('errors', 0)}")
+        output.append(f"Network Events: {sys_events.get('network_events', 0)}")
+        output.append(f"Unique IPs: {sys_events.get('unique_ips', 0)}")
+        output.append("")
+        
+        if sys_events.get('top_ips'):
+            output.append("TOP IPs IN NETWORK EVENTS:")
+            for ip in sys_events['top_ips'][:10]:
+                output.append(f"  - {ip}")
+            output.append("")
+        
+        if sys_events.get('sample_errors'):
+            output.append("SAMPLE ERRORS:")
+            for i, error in enumerate(sys_events['sample_errors'][:5], 1):
+                output.append(f"  {i}. {error[:100]}...")
+            output.append("")
+    
+    output.append("=" * 110)
+    output.append("TIP: Use --output json for complete details including all log entries")
+    output.append("=" * 110)
+    
+    return '\n'.join(output)
+
+
 def format_table(data):
     """Format data as ASCII table.
     
@@ -194,6 +529,14 @@ def format_table(data):
     # Check if it's memory dump analysis
     if data.get('analysis_type') == 'memory_dump':
         return format_memory_table(data)
+    
+    # Check if it's event log analysis
+    if data.get('analysis_type') == 'event_log':
+        return format_eventlog_table(data)
+    
+    # Check if it's text log analysis
+    if data.get('analysis_type') == 'text_log':
+        return format_textlog_table(data)
     
     # Print summary section
     output.append("=" * 110)

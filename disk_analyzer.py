@@ -5,14 +5,12 @@ import logging
 from filesystem_parser import extract_file_metadata, open_filesystem
 from yara_scanner import scan_files
 from system_intelligence import extract_system_intelligence
+from log_analyzer import extract_log_intelligence
 
 logger = logging.getLogger(__name__)
 
 QUICK_MODE_LIMIT = 50
 
-
-# =======================================================
-# HLAVNÍ FUNKCE PRO ANALÝZU OBRAZU DISKU
 
 def analyze_disk_image(image_path, quick_mode=False, yara_rules_path=None):
     """Analyzes disk image and optionally scans files with YARA.
@@ -44,6 +42,11 @@ def analyze_disk_image(image_path, quick_mode=False, yara_rules_path=None):
                 # Extract system intelligence
                 system_info = extract_system_intelligence(fs, result['results'])
                 result['system_intelligence'] = system_info
+                
+                # Extract log intelligence (logins, network connections, user/IP frequency)
+                if system_info.get('os_type') in ['linux', 'windows', 'macos']:
+                    log_info = extract_log_intelligence(fs, result['results'], system_info['os_type'])
+                    result['log_intelligence'] = log_info
                 
                 # Run YARA scanning
                 result['results'], yara_summary = scan_files(fs, result['results'], yara_rules_path)

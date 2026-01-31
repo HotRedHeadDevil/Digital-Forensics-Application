@@ -18,6 +18,7 @@ Thumbs.db
 
 # Local files not for GitHub
 .local_only/
+test-data-repo/
 
 # Forensic test images and data
 /not_working_disks

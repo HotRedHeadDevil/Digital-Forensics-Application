@@ -208,7 +208,7 @@ def analyze_windows_memory(memory_file):
             'top_local_ports': []
         },
         'suspicious_processes': [],
-        'suspicious_items': [],  # For network-based and other suspicious findings
+        'suspicious_items': [], 
         'loaded_modules': []
     }
     
@@ -276,9 +276,9 @@ def analyze_windows_memory(memory_file):
                         if field_str.endswith('.exe') or field_str.endswith('.ex') or field_str.endswith('.'):
                             continue
                         
-                        # Skip strings that look like truncated process names (mixed case with capitals in middle)
+                        # Skip strings that look like truncated process names
                         # e.g., SearchFilterHo, VGAuthService
-                        if re.search(r'[a-z][A-Z]', field_str):  # camelCase or mixed case
+                        if re.search(r'[a-z][A-Z]', field_str): 
                             continue
                         
                         # Accept only valid username patterns:

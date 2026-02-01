@@ -200,7 +200,7 @@ def eventlog(filepath, output):
             "events_parsed": analysis_data.get('events_parsed', 0)
         }
         
-        # Add security alerts first if available (most important)
+        # Add security alerts first if available
         if 'security_alerts' in analysis_data:
             security_alerts = analysis_data['security_alerts']
             summary['security_alerts'] = {

@@ -105,16 +105,12 @@ def extract_hostname_windows(fs):
     Returns:
         str or None: Hostname if found
     """
-    # Note: Full Windows registry parsing would require the Registry library
-    # For now, we'll try to find it in common text files or use a simplified approach
     
     paths_to_check = [
         "/Windows/System32/config/SAM",
         "/WINDOWS/system32/config/SAM",
     ]
-    
-    # This is a simplified implementation
-    # A full implementation would parse the SYSTEM registry hive
+
     logger.debug("Windows hostname extraction requires registry parsing (not fully implemented)")
     
     return None
@@ -278,7 +274,7 @@ def extract_os_version_macos(fs):
             content = file_obj.read_random(0, min(file_obj.info.meta.size, 8192))
             text = content.decode('utf-8', errors='ignore')
             
-            # Simple regex parsing of plist (proper parsing would use plistlib)
+            # Simple regex parsing of plist
             product_name_match = re.search(r'<key>ProductName</key>\s*<string>([^<]+)</string>', text)
             if product_name_match:
                 os_info['name'] = product_name_match.group(1)

@@ -6,6 +6,36 @@ import io
 from datetime import datetime
 
 
+def _translate_windows_status_code(code):
+    """Translate Windows security status codes to readable messages.
+    
+    Args:
+        code: Status code string (e.g., '%%2310')
+        
+    Returns:
+        str: Human-readable description
+    """
+    status_codes = {
+        '%%2310': 'Account disabled',
+        '%%2311': 'Account expired',
+        '%%2312': 'Account locked out',
+        '%%2313': 'Account restriction',
+        '0xC000006D': 'Bad username',
+        '0xC000006E': 'Account restriction',
+        '0xC000006F': 'Invalid logon hours',
+        '0xC0000070': 'Workstation restriction',
+        '0xC0000071': 'Password expired',
+        '0xC0000072': 'Account disabled',
+        '0xC0000193': 'Account expired',
+        '0xC0000234': 'Account locked out',
+        '0xC0000371': 'Local account restriction',
+        '0xC000015B': 'Logon type not granted'
+    }
+    
+    # Return translated message if found, otherwise return original code
+    return status_codes.get(code, code)
+
+
 def format_json(data):
     """Format data as JSON string.
     
@@ -75,6 +105,15 @@ def format_memory_table(data):
         output.append(f"\nError: {data.get('error', 'Unknown error')}")
         output.append("=" * 110)
         return '\n'.join(output)
+    
+    # Check for OS mismatch warning
+    if data.get('os_mismatch_warning'):
+        output.append("")
+        output.append("⚠️  WARNING: POSSIBLE OS TYPE MISMATCH")
+        output.append("-" * 110)
+        output.append(f"   {data['os_mismatch_warning']}")
+        output.append("-" * 110)
+        output.append("")
     
     output.append(f"Total Processes: {data.get('process_count', 0)}")
     output.append(f"Network Connections: {data.get('network_connections', 0)}")
@@ -222,7 +261,6 @@ def format_eventlog_table(data):
             output.append("-" * 110)
             output.append(f"Critical Alerts: {critical_count}")
             output.append(f"Warnings: {warning_count}")
-            output.append(f"Info: {info_count}")
             output.append("")
             
             # Show critical alerts
@@ -268,35 +306,38 @@ def format_eventlog_table(data):
         
         # Show top users
         if login.get('top_users'):
+            output.append("")
             output.append("TOP USERS:")
             header = f"{'User':<50} {'Count':<10}"
             output.append(header)
-            output.append("-" * 110)
+            output.append("-" * 60)
             for user_info in login['top_users'][:10]:
                 user = user_info.get('user', 'Unknown')[:49]
                 count = user_info.get('count', 0)
                 row = f"{user:<50} {count:<10}"
                 output.append(row)
-            output.append("")
+            output.append("-" * 60)
         
         # Show top IPs
         if login.get('top_ips'):
-            output.append("TOP SOURCE IPS:")
-            header = f"{'IP Address':<30} {'Count':<10}"
-            output.append(header)
-            output.append("-" * 110)
-            for ip_info in login['top_ips'][:10]:
-                ip = ip_info.get('ip', 'Unknown')[:29]
-                count = ip_info.get('count', 0)
-                row = f"{ip:<30} {count:<10}"
-                output.append(row)
             output.append("")
+            output.append("TOP SOURCE IP ADDRESSES:")
+            header = f"{'IP Address':<50} {'Count':<10}"
+            output.append(header)
+            output.append("-" * 60)
+            for ip_info in login['top_ips'][:10]:
+                ip = ip_info.get('ip', 'Unknown')[:49]
+                count = ip_info.get('count', 0)
+                row = f"{ip:<50} {count:<10}"
+                output.append(row)
+            output.append("-" * 60)
         
         # Show recent failed logins
         if login.get('details', {}).get('failed_logins'):
             failed = login['details']['failed_logins']
             if failed:
-                output.append("RECENT FAILED LOGIN ATTEMPTS:")
+                output.append("")
+                output.append("FAILED LOGIN ATTEMPTS:")
                 header = f"{'Timestamp':<28} {'User':<30} {'IP Address':<20} {'Reason':<30}"
                 output.append(header)
                 output.append("-" * 110)
@@ -304,7 +345,8 @@ def format_eventlog_table(data):
                     timestamp = str(attempt.get('timestamp', 'Unknown'))[:27]
                     user = attempt.get('user', 'Unknown')[:29]
                     ip = attempt.get('ip_address', '-')[:19]
-                    reason = attempt.get('failure_reason', '-')[:29]
+                    raw_reason = attempt.get('failure_reason', '-')
+                    reason = _translate_windows_status_code(raw_reason)[:29]
                     row = f"{timestamp:<28} {user:<30} {ip:<20} {reason:<30}"
                     output.append(row)
                 if len(failed) > 10:
@@ -377,7 +419,6 @@ def format_textlog_table(data):
             output.append("-" * 110)
             output.append(f"Critical Alerts: {critical_count}")
             output.append(f"Warnings: {warning_count}")
-            output.append(f"Info: {info_count}")
             output.append("")
             
             # Show critical alerts
@@ -427,12 +468,13 @@ def format_textlog_table(data):
             output.append("TOP USERS:")
             header = f"{'User':<30} {'Count':<10}"
             output.append(header)
-            output.append("-" * 110)
+            output.append("-" * 40)
             for user_info in login['top_users'][:10]:
                 user = user_info.get('user', 'Unknown')[:29]
                 count = user_info.get('count', 0)
                 row = f"{user:<30} {count:<10}"
                 output.append(row)
+            output.append("-" * 40)
             output.append("")
         
         # Show top IPs
@@ -440,37 +482,40 @@ def format_textlog_table(data):
             output.append("TOP SOURCE IPS:")
             header = f"{'IP Address':<30} {'Count':<10}"
             output.append(header)
-            output.append("-" * 110)
+            output.append("-" * 40)
             for ip_info in login['top_ips'][:10]:
                 ip = ip_info.get('ip', 'Unknown')[:29]
                 count = ip_info.get('count', 0)
                 row = f"{ip:<30} {count:<10}"
                 output.append(row)
+            output.append("-" * 40)
             output.append("")
         
         # Show recent failed logins
         if login.get('details', {}).get('failed_logins'):
             failed = login['details']['failed_logins']
             if failed:
-                output.append("RECENT FAILED LOGIN ATTEMPTS:")
+                output.append("")
+                output.append("FAILED LOGIN ATTEMPTS:")
                 header = f"{'User':<20} {'IP Address':<20} {'Reason':<20}"
                 output.append(header)
-                output.append("-" * 110)
+                output.append("-" * 60)
                 for attempt in failed[:15]:
                     user = attempt.get('user', 'Unknown')[:19]
                     ip = attempt.get('ip_address', '-')[:19]
                     reason = attempt.get('reason', '-')[:19]
                     row = f"{user:<20} {ip:<20} {reason:<20}"
                     output.append(row)
+                output.append("-" * 60)
                 if len(failed) > 15:
                     output.append(f"\n... and {len(failed) - 15} more failed attempts")
-                output.append("")
         
         # Show sample sudo commands
         if login.get('details', {}).get('sudo_commands'):
             sudo = login['details']['sudo_commands']
             if sudo:
-                output.append("SAMPLE SUDO COMMANDS:")
+                output.append("")
+                output.append("SUDO COMMANDS:")
                 header = f"{'User':<20} {'Command':<85}"
                 output.append(header)
                 output.append("-" * 110)

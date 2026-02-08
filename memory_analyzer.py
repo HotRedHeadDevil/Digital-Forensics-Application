@@ -346,7 +346,14 @@ def analyze_windows_memory(memory_file):
         logger.info(f"Found {len(results['processes'])} processes")
         
     except Exception as e:
-        logger.error(f"Process list extraction failed: {e}")
+        error_msg = str(e)
+        logger.error(f"Process list extraction failed: {error_msg}")
+        
+        # Check if this might be a Linux memory dump
+        if 'Symbol table' in error_msg or 'No such file' in error_msg or 'layer' in error_msg.lower():
+            logger.warning("⚠ This might be a Linux memory dump, not Windows!")
+            logger.warning("Try running without --os-type to auto-detect, or specify --os-type linux")
+            results['os_mismatch_warning'] = "This might be a Linux memory dump. Try --os-type linux or remove --os-type for auto-detection."
     
     try:
         # Network connections
@@ -576,7 +583,14 @@ def analyze_linux_memory(memory_file):
         logger.info(f"Found {len(results['processes'])} processes")
         
     except Exception as e:
-        logger.error(f"Linux process list extraction failed: {e}")
+        error_msg = str(e)
+        logger.error(f"Linux process list extraction failed: {error_msg}")
+        
+        # Check if this might be a Windows memory dump
+        if 'Unknown symbol' in error_msg or 'init_task' in error_msg:
+            logger.warning("⚠ This appears to be a Windows memory dump, not Linux!")
+            logger.warning("Try running without --os-type to auto-detect, or specify --os-type windows")
+            results['os_mismatch_warning'] = "This appears to be a Windows memory dump. Try --os-type windows or remove --os-type for auto-detection."
     
     return results
 

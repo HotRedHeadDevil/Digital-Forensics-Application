@@ -463,14 +463,20 @@ def _detect_security_threats_textlog(login_events):
     
     # Check for failed login attempts
     if failed_logins:
-        # Group by IP
+        # First, identify invalid user attempts
+        invalid_users = [e for e in failed_logins if e.get('reason') == 'invalid_user']
+        
+        # Group by IP (excluding invalid user attempts to avoid duplication)
         failed_by_ip = defaultdict(list)
         for event in failed_logins:
+            # Skip invalid user attempts as they'll be reported separately
+            if event.get('reason') == 'invalid_user':
+                continue
             ip = event.get('ip_address', '-')
             if ip != '-':
                 failed_by_ip[ip].append(event)
         
-        # Detect brute force attempts
+        # Detect brute force attempts (only for valid user attempts)
         for ip, events in failed_by_ip.items():
             if len(events) >= 5:
                 alerts['critical'].append({
@@ -495,8 +501,7 @@ def _detect_security_threats_textlog(login_events):
                     }
                 })
         
-        # Check for invalid user attempts
-        invalid_users = [e for e in failed_logins if e.get('reason') == 'invalid_user']
+        # Check for invalid user attempts (reported separately)
         if invalid_users:
             alerts['warnings'].append({
                 'type': 'invalid_user_attempts',
@@ -571,58 +576,65 @@ def _detect_security_threats(login_events):
             if ip not in ['-', '127.0.0.1', '::1']:
                 failed_by_ip[ip].append(event)
         
-        # Detect brute force attempts
-        for ip, events in failed_by_ip.items():
-            if len(events) >= 3:
-                alerts['critical'].append({
-                    'type': 'brute_force_attempt',
-                    'severity': 'critical',
-                    'message': f"Multiple failed login attempts ({len(events)}) from IP {ip}",
-                    'details': {
-                        'ip_address': ip,
-                        'attempt_count': len(events),
-                        'targeted_users': list(set(e.get('user', 'unknown') for e in events))
-                    }
-                })
-            elif len(events) >= 2:
-                alerts['warnings'].append({
-                    'type': 'suspicious_login_attempts',
-                    'severity': 'warning',
-                    'message': f"Suspicious login attempts ({len(events)}) from IP {ip}",
-                    'details': {
-                        'ip_address': ip,
-                        'attempt_count': len(events),
-                        'targeted_users': list(set(e.get('user', 'unknown') for e in events))
-                    }
-                })
-        
-        # Detect guest account attempts
+        # Track users with disabled account attempts to avoid duplicate alerts
+        disabled_account_users = set()
         for user, events in failed_by_user.items():
-            if 'guest' in user.lower():
-                alerts['critical'].append({
-                    'type': 'guest_account_attempt',
-                    'severity': 'critical',
-                    'message': f"Failed login attempts to guest account ({len(events)} times)",
-                    'details': {
-                        'user': user,
-                        'attempt_count': len(events),
-                        'source_ips': list(set(e.get('ip_address', '-') for e in events if e.get('ip_address') not in ['-', '127.0.0.1', '::1']))
-                    }
-                })
-            
-            # Detect disabled account attempts
             for event in events:
                 if '%%2310' in event.get('failure_reason', ''):
-                    alerts['warnings'].append({
-                        'type': 'disabled_account_attempt',
-                        'severity': 'warning',
-                        'message': f"Attempt to login to disabled account: {user}",
+                    disabled_account_users.add(user)
+                    break
+        
+        # Detect brute force attempts (skip if it's just disabled account attempts)
+        for ip, events in failed_by_ip.items():
+            # Check if all events are from disabled accounts
+            users_from_ip = set(e.get('user', 'unknown') for e in events)
+            all_disabled = users_from_ip.issubset(disabled_account_users)
+            
+            # Only create IP-based alerts if not all attempts are to disabled accounts
+            if not all_disabled:
+                if len(events) >= 3:
+                    alerts['critical'].append({
+                        'type': 'brute_force_attempt',
+                        'severity': 'critical',
+                        'message': f"Multiple failed login attempts ({len(events)}) from IP {ip}",
                         'details': {
-                            'user': user,
-                            'ip_address': event.get('ip_address', '-'),
-                            'timestamp': event.get('timestamp', 'unknown')
+                            'ip_address': ip,
+                            'attempt_count': len(events),
+                            'targeted_users': list(set(e.get('user', 'unknown') for e in events))
                         }
                     })
+                elif len(events) >= 2:
+                    alerts['warnings'].append({
+                        'type': 'suspicious_login_attempts',
+                        'severity': 'warning',
+                        'message': f"Suspicious login attempts ({len(events)}) from IP {ip}",
+                        'details': {
+                            'ip_address': ip,
+                            'attempt_count': len(events),
+                            'targeted_users': list(set(e.get('user', 'unknown') for e in events))
+                        }
+                    })
+        
+        # Detect disabled account attempts (consolidated per user)
+        for user in disabled_account_users:
+            events = [e for e in failed_by_user[user] if '%%2310' in e.get('failure_reason', '')]
+            ips = list(set(e.get('ip_address', '-') for e in events if e.get('ip_address') not in ['-', '127.0.0.1', '::1']))
+            
+            # Determine if this is a guest account
+            is_guest = 'guest' in user.lower()
+            
+            # Create a single consolidated alert per disabled account
+            alerts['critical' if is_guest else 'warnings'].append({
+                'type': 'disabled_account_attempt',
+                'severity': 'critical' if is_guest else 'warning',
+                'message': f"Failed login attempts to disabled account '{user}' ({len(events)} times)",
+                'details': {
+                    'user': user,
+                    'attempt_count': len(events),
+                    'source_ips': ips,
+                    'timestamps': [e.get('timestamp', 'unknown') for e in events]
+                }
+            })
     
     # Check for administrator/privileged account logins
     for event in successful_logins:

@@ -50,24 +50,50 @@ def format_json(data):
 
 def format_csv(data):
     """Format data as CSV string.
-    
+
+    CSV export is inherently record-oriented, and the three analysis types
+    this tool produces have very different shapes, so each gets its own
+    exporter rather than forcing everything through one fixed schema.
+
     Args:
         data: Dictionary containing analysis results
-        
+
     Returns:
         str: CSV formatted string
     """
-    output = io.StringIO()
-    
+    analysis_type = data.get('analysis_type')
+
+    if analysis_type == 'memory_dump':
+        return _format_csv_memory(data)
+
+    if analysis_type in ('event_log', 'text_log'):
+        return _format_csv_login_events(data)
+
+    return _format_csv_disk_image(data, analysis_type)
+
+
+def _format_csv_disk_image(data, analysis_type):
+    """Format disk-image file/directory listing as CSV.
+
+    Args:
+        data: Dictionary containing disk-image analysis results
+        analysis_type: The analysis_type value from data, used only to
+            produce a clearer message if there's nothing to export
+
+    Returns:
+        str: CSV formatted string
+    """
     if 'results' not in data or not data['results']:
-        return "No results to export"
-    
+        return (f"No results to export as CSV for analysis type "
+                f"'{analysis_type or 'unknown'}'. Try --output json or --output table instead.")
+
     # Extract file/directory entries
     results = data['results']
-    
+
     # Define CSV columns
     fieldnames = ['name', 'path', 'type', 'size', 'inode', 'm_time', 'a_time', 'c_time', 'e_time', 'yara_matches']
-    
+
+    output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction='ignore')
     writer.writeheader()
     
@@ -78,6 +104,78 @@ def format_csv(data):
             row['yara_matches'] = ', '.join(row['yara_matches'])
         writer.writerow(row)
     
+    return output.getvalue()
+
+
+def _format_csv_memory(data):
+    """Format memory-dump process list as CSV.
+
+    Network connections and loaded modules have a different shape (and
+    much wider column set) than processes, so they're intentionally left
+    out here - use --output json for those.
+
+    Args:
+        data: Dictionary containing memory-dump analysis results
+
+    Returns:
+        str: CSV formatted string
+    """
+    processes = data.get('processes', [])
+    if not processes:
+        return "No processes to export as CSV. Try --output json for full details (including network connections and loaded modules)."
+
+    fieldnames = ['pid', 'ppid', 'name', 'threads', 'handles']
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction='ignore')
+    writer.writeheader()
+
+    for proc in processes:
+        writer.writerow(proc)
+
+    return output.getvalue()
+
+
+def _format_csv_login_events(data):
+    """Format login events from event_log/text_log analysis as a flat CSV.
+
+    Successful and failed logins are combined into one table with a
+    'status' column, since analysts usually want to sort/filter across
+    both together (e.g. by IP or user).
+
+    Args:
+        data: Dictionary containing event_log or text_log analysis results
+
+    Returns:
+        str: CSV formatted string
+    """
+    login_events = data.get('login_events', {})
+    details = login_events.get('details', {}) if isinstance(login_events, dict) else {}
+
+    rows = []
+    for event in details.get('successful_logins', []):
+        row = dict(event)
+        row['status'] = 'success'
+        rows.append(row)
+    for event in details.get('failed_logins', []):
+        row = dict(event)
+        row['status'] = 'failed'
+        rows.append(row)
+
+    if not rows:
+        return "No login events to export as CSV. Try --output json for full details."
+
+    fieldnames = ['status']
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction='ignore')
+    writer.writeheader()
+    writer.writerows(rows)
+
     return output.getvalue()
 
 
@@ -688,7 +786,6 @@ def format_table(data):
         output.append("FILES AND DIRECTORIES")
         output.append("-" * 110)
         
-        # Table header with fixed column widths
         header = f"{'Type':<8} {'Name':<40} {'Size':<12} {'YARA Matches':<35}"
         output.append(header)
         output.append("-" * 110)
@@ -697,11 +794,9 @@ def format_table(data):
             item_type = item.get('type', 'N/A')
             name = item.get('name', 'N/A')
             
-            # Truncate long names with ellipsis
             if len(name) > 39:
                 name = name[:36] + '...'
             
-            # Format size better
             if item.get('type') == 'file':
                 size_bytes = item.get('size', 0)
                 if size_bytes < 1024:
@@ -713,10 +808,8 @@ def format_table(data):
             else:
                 size = '-'
             
-            # Format YARA matches with fixed width
             if 'yara_matches' in item and item['yara_matches']:
                 yara = ', '.join(item['yara_matches'])
-                # Truncate if too long
                 if len(yara) > 34:
                     yara = yara[:31] + '...'
             else:

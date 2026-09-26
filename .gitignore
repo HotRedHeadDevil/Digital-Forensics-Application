@@ -5,6 +5,7 @@ __pycache__/
 *.so
 venv/
 env/
+.venv/
 .Python
 
 # IDE and editor files

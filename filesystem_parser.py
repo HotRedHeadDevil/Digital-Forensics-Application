@@ -9,9 +9,28 @@ logger = logging.getLogger(__name__)
 SKIP_DIRS = ['.', '..']
 SYSTEM_FILES = ['$MBR', '$FAT1', '$FAT2', '$OrphanFiles']
 DEFAULT_SECTOR_SIZE = 512
+MAX_RECURSION_DEPTH = 100  # safety limit against directory cycles / corrupted filesystems
 
-# Track if we've already shown the partition warning for this run
+_FAT_FS_TYPE_NAMES = ['TSK_FS_TYPE_FAT12', 'TSK_FS_TYPE_FAT16', 'TSK_FS_TYPE_FAT32',
+                      'TSK_FS_TYPE_FAT_DETECT', 'TSK_FS_TYPE_EXFAT']
+FAT_FS_TYPES = {getattr(pytsk3, name) for name in _FAT_FS_TYPE_NAMES if hasattr(pytsk3, name)}
+
 _partition_warning_shown = False
+
+
+def _is_fat_like_filesystem(fs):
+    """Whether fs is a FAT/exFAT filesystem.
+
+    Args:
+        fs: PyTSK3 FS_Info object
+
+    Returns:
+        bool: True if fs is a FAT-family filesystem
+    """
+    try:
+        return fs.info.ftype in FAT_FS_TYPES
+    except Exception:
+        return False
 
 
 def open_filesystem(img):
@@ -70,17 +89,31 @@ def open_filesystem(img):
         return None, None
 
 
-def scan_directory(fs, directory, current_path):
+def scan_directory(fs, directory, current_path, visited_inodes=None, depth=0, is_fat_fs=None):
     """Recursively scans directory and collects file metadata.
     
     Args:
         fs: PyTSK3 FS_Info object
         directory: Current directory to scan
         current_path: Path to current directory
+        visited_inodes: Set of directory inode addresses already scanned in
+            this run
+        depth: Current recursion depth, used to enforce MAX_RECURSION_DEPTH
+        is_fat_fs: Whether fs is a FAT/exFAT filesystem
         
     Returns:
         list: List of dictionaries with file metadata
     """
+    if visited_inodes is None:
+        visited_inodes = set()
+
+    if is_fat_fs is None:
+        is_fat_fs = _is_fat_like_filesystem(fs)
+
+    if depth > MAX_RECURSION_DEPTH:
+        logger.warning(f"Max recursion depth ({MAX_RECURSION_DEPTH}) reached at '{current_path}', stopping recursion here (possible directory cycle or corrupted filesystem).")
+        return []
+
     files_data = []
 
     for entry in directory:
@@ -108,7 +141,7 @@ def scan_directory(fs, directory, current_path):
             is_dir = (file_info.meta.type == pytsk3.TSK_FS_META_TYPE_DIR)
             
             is_volume_label = (file_name.endswith('(Volume Label Entry)') or 
-                             (file_info.meta.size == 0 and not is_dir and file_name.isupper()))
+                             (is_fat_fs and file_info.meta.size == 0 and not is_dir and file_name.isupper()))
             
             if is_volume_label or file_name in SYSTEM_FILES:
                 logger.debug(f"Skipped system/volume label file: {file_name}")
@@ -132,9 +165,14 @@ def scan_directory(fs, directory, current_path):
             logger.debug(f"Added {type_str}: {file_name}, size: {file_info.meta.size}")
 
             if is_dir:
+                if file_info.meta.addr in visited_inodes:
+                    logger.warning(f"Directory cycle detected: '{full_path}' (inode {file_info.meta.addr}) was already scanned, skipping to avoid infinite recursion.")
+                    continue
+
+                visited_inodes.add(file_info.meta.addr)
                 try:
                     sub_directory = fs.open_dir(inode=file_info.meta.addr)
-                    files_data.extend(scan_directory(fs, sub_directory, full_path))
+                    files_data.extend(scan_directory(fs, sub_directory, full_path, visited_inodes, depth + 1, is_fat_fs))
                 except Exception as e:
                     logger.warning(f"Error recursing into directory {file_name}: {e}")
                     continue 
@@ -151,7 +189,7 @@ def extract_file_metadata(image_path, quick_mode=False, limit=None):
     
     Args:
         image_path: Path to disk image
-        quick_mode: If True, limit results
+        quick_mode: Kept for API compatibility; does not limit results
         limit: Maximum number of files to return (None = no limit)
         
     Returns:

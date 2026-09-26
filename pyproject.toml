@@ -1,0 +1,15 @@
+[project]
+name = "forensic-auto-cli"
+version = "0.1.0"
+description = "Automated tool for preliminary forensic data analysis"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "click>=8.1,<9",
+    "pytsk3>=20240513",
+    "python-evtx>=0.8.1",
+    "volatility3>=2.11,<3",
+    "yara-python>=4.5,<5",
+]
+
+[tool.uv]
+package = false

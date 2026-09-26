@@ -1,10 +1,16 @@
 # yara_scanner.py - YARA scanning module
 
-import yara
 import pytsk3
 import logging
 
 logger = logging.getLogger(__name__)
+
+try:
+    import yara
+    YARA_AVAILABLE = True
+except ImportError:
+    yara = None
+    YARA_AVAILABLE = False
 
 DEFAULT_YARA_RULES_PATH = 'rules/my_rules.yar'
 MAX_FILE_SCAN_SIZE = 10 * 1024 * 1024  # 10 MB
@@ -19,6 +25,10 @@ def compile_yara_rules(rules_path=None):
     Returns:
         yara.Rules object or None on error
     """
+    if not YARA_AVAILABLE:
+        logger.error("yara-python not installed. Run: pip install yara-python. Skipping YARA scanning.")
+        return None
+
     if rules_path is None:
         rules_path = DEFAULT_YARA_RULES_PATH
     

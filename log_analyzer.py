@@ -1,6 +1,5 @@
 # log_analyzer.py - Log file analysis module for login attempts, network connections, and user activity
 
-import pytsk3
 import logging
 import re
 import struct
@@ -705,7 +704,6 @@ def parse_auth_log(fs, file_list):
         try:
             file_obj = fs.open(log_path)
             if file_obj and file_obj.info.meta.size > 0:
-                # Read up to 5MB of logs
                 size_to_read = min(file_obj.info.meta.size, 5 * 1024 * 1024)
                 content = file_obj.read_random(0, size_to_read)
                 text = content.decode('utf-8', errors='ignore')
@@ -717,7 +715,6 @@ def parse_auth_log(fs, file_list):
                         continue
                     
                     # Successful SSH logins
-                    # Example: Jan 15 10:23:45 server sshd[1234]: Accepted password for alice from 192.168.1.100 port 54321 ssh2
                     ssh_success = re.search(r'sshd\[\d+\]:\s+Accepted\s+\w+\s+for\s+(\S+)\s+from\s+([\d.]+)', line)
                     if ssh_success:
                         user = ssh_success.group(1)
@@ -733,7 +730,6 @@ def parse_auth_log(fs, file_list):
                         auth_data['ssh_connections'].append({'user': user, 'ip': ip})
                     
                     # Failed SSH logins
-                    # Example: Jan 15 10:23:45 server sshd[1234]: Failed password for bob from 192.168.1.101 port 54322 ssh2
                     ssh_fail = re.search(r'sshd\[\d+\]:\s+Failed\s+password\s+for\s+(\S+)\s+from\s+([\d.]+)', line)
                     if ssh_fail:
                         user = ssh_fail.group(1)
@@ -761,7 +757,6 @@ def parse_auth_log(fs, file_list):
                         auth_data['ip_frequency'][ip] += 1
                     
                     # Sudo commands
-                    # Example: Jan 15 10:23:45 server sudo: alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/bin/cat /etc/shadow
                     sudo_cmd = re.search(r'sudo:\s+(\S+)\s+:.*COMMAND=(.+)$', line)
                     if sudo_cmd:
                         user = sudo_cmd.group(1)
@@ -812,7 +807,6 @@ def parse_syslog(fs, file_list):
         try:
             file_obj = fs.open(log_path)
             if file_obj and file_obj.info.meta.size > 0:
-                # Read up to 5MB of logs
                 size_to_read = min(file_obj.info.meta.size, 5 * 1024 * 1024)
                 content = file_obj.read_random(0, size_to_read)
                 text = content.decode('utf-8', errors='ignore')
@@ -924,7 +918,6 @@ def parse_windows_event_logs(fs, file_list):
             # Extract event log file to temporary location for parsing
             file_obj = fs.open(log_item['path'])
             if file_obj and file_obj.info.meta.size > 0:
-                # Read the entire EVTX file (limit to 50MB for safety)
                 max_size = min(file_obj.info.meta.size, 50 * 1024 * 1024)
                 evtx_data = file_obj.read_random(0, max_size)
                 
@@ -973,7 +966,7 @@ def parse_windows_event_logs(fs, file_list):
                                     if event_dict:
                                         event_data['login_events']['logoffs'].append(event_dict)
                                 
-                                # Other security events (limited to first 100)
+                                # Other security events
                                 elif len(event_data['security_events']) < 100:
                                     event_data['security_events'].append({
                                         'event_id': event_id,
@@ -988,7 +981,6 @@ def parse_windows_event_logs(fs, file_list):
                               f"{len(event_data['login_events']['failed_logins'])} failed logins")
                     
                 finally:
-                    # Clean up temp file
                     import os
                     try:
                         os.unlink(tmp_path)
@@ -1119,7 +1111,6 @@ def parse_windows_powershell_logs(fs, file_list):
     # Look for PowerShell operational logs
     for item in file_list:
         if item['type'] == 'file':
-            # PowerShell logs are typically in Windows/System32/winevt/Logs/
             if 'PowerShell' in item['path'] and item['name'].endswith('.evtx'):
                 ps_data['execution_events'].append({
                     'log_file': item['path'],
@@ -1129,6 +1120,30 @@ def parse_windows_powershell_logs(fs, file_list):
                 logger.info(f"Found PowerShell log: {item['path']}")
     
     return ps_data
+
+
+def _normalize_login_ip(event):
+    """Ensure a login-event dict exposes its source IP under the 'ip' key.
+
+    Different parsers in this module use different key names for the same
+    piece of data: parse_auth_log() uses 'ip', parse_standalone_log() and
+    parse_single_event_log() use 'ip_address', and parse_windows_event_logs()
+    uses 'source_ip'. analyze_login_patterns() only ever reads 'ip', so any
+    event coming from a parser that doesn't use that key needs to be
+    normalized first, or downstream code raises a KeyError.
+
+    Args:
+        event: A single login/failed-login event dictionary
+
+    Returns:
+        dict: The same event, guaranteed to have a usable 'ip' key
+    """
+    if event.get('ip'):
+        return event
+
+    normalized = dict(event)
+    normalized['ip'] = event.get('source_ip') or event.get('ip_address') or '-'
+    return normalized
 
 
 def analyze_login_patterns(auth_data, syslog_data, windows_events=None):
@@ -1145,12 +1160,12 @@ def analyze_login_patterns(auth_data, syslog_data, windows_events=None):
     # Merge Windows event data if available
     if windows_events and 'login_events' in windows_events:
         win_login = windows_events['login_events']
-        # Merge successful logins
+        # Merge successful logins (normalize source_ip -> ip)
         for login in win_login.get('successful_logins', []):
-            auth_data['successful_logins'].append(login)
-        # Merge failed logins
+            auth_data['successful_logins'].append(_normalize_login_ip(login))
+        # Merge failed logins (normalize source_ip -> ip)
         for login in win_login.get('failed_logins', []):
-            auth_data['failed_logins'].append(login)
+            auth_data['failed_logins'].append(_normalize_login_ip(login))
         # Merge frequencies
         for user, count in win_login.get('user_frequency', {}).items():
             auth_data['user_frequency'][user] += count
@@ -1192,11 +1207,11 @@ def analyze_login_patterns(auth_data, syslog_data, windows_events=None):
     # Detect potential brute force attacks (IPs with many failed login attempts)
     failed_by_ip = defaultdict(int)
     for failed in auth_data['failed_logins']:
-        failed_by_ip[failed['ip']] += 1
+        failed_by_ip[failed.get('ip', '-')] += 1
     
     for ip, fail_count in failed_by_ip.items():
         if fail_count >= 5:  # Threshold for suspicious activity
-            successful_count = sum(1 for s in auth_data['successful_logins'] if s['ip'] == ip)
+            successful_count = sum(1 for s in auth_data['successful_logins'] if s.get('ip') == ip)
             analysis['brute_force_candidates'].append({
                 'ip': ip,
                 'failed_attempts': fail_count,
@@ -1206,7 +1221,7 @@ def analyze_login_patterns(auth_data, syslog_data, windows_events=None):
     
     # Detect logins from unusual IPs (IPs that appear in failed but not successful)
     failed_ips = set(failed_by_ip.keys())
-    successful_ips = set(s['ip'] for s in auth_data['successful_logins'])
+    successful_ips = set(s.get('ip') for s in auth_data['successful_logins'])
     
     # IPs with only failed attempts (possible scanning)
     scanning_ips = failed_ips - successful_ips
@@ -1286,7 +1301,6 @@ def extract_log_intelligence(fs, file_list, os_type):
         # Analyze login patterns from Windows events
         if event_data.get('login_events'):
             logger.info("Analyzing Windows login patterns...")
-            # Create empty auth_data and syslog_data for compatibility
             empty_auth = {
                 'successful_logins': [],
                 'failed_logins': [],

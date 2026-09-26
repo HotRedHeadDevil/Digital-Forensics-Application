@@ -184,7 +184,6 @@ def extract_os_version_linux(fs):
     os_info = {}
     
     try:
-        # Try /etc/os-release (modern systems)
         file_obj = fs.open("/etc/os-release")
         if file_obj and file_obj.info.meta.size > 0:
             content = file_obj.read_random(0, min(file_obj.info.meta.size, 4096))
@@ -268,7 +267,6 @@ def extract_os_version_macos(fs):
     os_info = {}
     
     try:
-        # Try /System/Library/CoreServices/SystemVersion.plist
         file_obj = fs.open("/System/Library/CoreServices/SystemVersion.plist")
         if file_obj and file_obj.info.meta.size > 0:
             content = file_obj.read_random(0, min(file_obj.info.meta.size, 8192))
@@ -356,11 +354,11 @@ def extract_command_history(fs, file_list, os_type, user_profiles):
                 content = file_obj.read_random(0, size_to_read)
                 text = content.decode('utf-8', errors='ignore')
                 
-                # Parse commands (each line is typically a command)
+                # Parse commands
                 commands = []
                 for line in text.split('\n'):
                     line = line.strip()
-                    if line and not line.startswith('#'):  # Skip comments
+                    if line and not line.startswith('#'):
                         commands.append(line)
                 
                 if commands:
@@ -428,7 +426,7 @@ def analyze_command_history(history_data):
         r'\bsu\s+',
         r'\bsudo\s+',
         r'\bpkexec\s+',
-        r'\bchmod\s+[4567]\d\d\d',  # SUID/SGID bits
+        r'\bchmod\s+[4567]\d\d\d',
         r'\bchmod\s+\+s\b',
         
         # Encoding/Obfuscation

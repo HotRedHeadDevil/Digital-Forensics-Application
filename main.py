@@ -2,8 +2,6 @@ import click
 import json
 import os
 import logging
-from disk_analyzer import analyze_disk_image
-from memory_analyzer import analyze_memory_dump
 from validators import validate_image_file, validate_yara_rules, validate_output_format
 from output_formatter import format_output
 
@@ -11,7 +9,13 @@ logger = logging.getLogger(__name__)
 
 
 def print_output(data, format_type='json'):
-    """Prints data in structured format (JSON is default)."""
+    """Prints data in structured format (JSON is default).
+    """
+    is_valid, error = validate_output_format(format_type)
+    if not is_valid:
+        logger.warning(f"{error}. Falling back to JSON output.")
+        format_type = 'json'
+
     output = format_output(data, format_type)
     click.echo(output)
 
@@ -46,6 +50,12 @@ def memory(filepath, os_type, output):
     
     FILEPATH: Path to memory dump file (.raw, .mem, .dmp, .vmem, etc.)
     """
+    try:
+        from memory_analyzer import analyze_memory_dump
+    except ImportError as e:
+        click.echo(json.dumps({"error": f"Memory analysis is unavailable: {e}"}, indent=4), err=True)
+        return
+    
     click.echo(f"Analyzing memory dump: {os.path.basename(filepath)}")
     
     # Analyze memory dump
@@ -90,7 +100,7 @@ def memory(filepath, os_type, output):
 @click.option('--yara-rules', '-y', type=click.Path(exists=True), 
               help='Path to YARA rules file (default: rules/my_rules.yar)')
 @click.option('--quick', is_flag=True, 
-              help='Quick mode - limit scan and skip YARA')
+              help='Quick mode - skip YARA scanning')
 @click.option('--output', '-o', type=click.Choice(['json', 'csv', 'table'], case_sensitive=False),
               default='json', help='Output format (default: json)')
 def disk(filepath, yara_rules, quick, output):
@@ -98,6 +108,12 @@ def disk(filepath, yara_rules, quick, output):
     
     FILEPATH: Path to disk image file.
     """
+    try:
+        from disk_analyzer import analyze_disk_image
+    except ImportError as e:
+        click.echo(json.dumps({"error": f"Disk analysis is unavailable: {e}. Make sure pytsk3 is installed (pip install pytsk3)."}, indent=4), err=True)
+        return
+    
     is_valid, error = validate_image_file(filepath)
     if not is_valid:
         click.echo(json.dumps({"error": error}, indent=4), err=True)

@@ -4,22 +4,23 @@ import logging
 import os
 import sys
 import json
+import traceback
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Import Volatility 3
 try:
     from volatility3 import framework
     from volatility3.framework import contexts, automagic, plugins, constants
     
     # Configure Volatility logging to reduce duplicate warnings
     vol_logger = logging.getLogger('volatility3')
-    vol_logger.setLevel(logging.ERROR)  # Only show errors from Volatility, not warnings
+    vol_logger.setLevel(logging.ERROR) 
     
+    VOLATILITY_AVAILABLE = True
 except ImportError:
-    logger.error("Volatility 3 not installed. Run: pip install volatility3")
-    raise
+    logger.warning("Volatility 3 not installed. Memory analysis will be unavailable until you run: pip install volatility3")
+    VOLATILITY_AVAILABLE = False
 
 
 def clean_value(value):
@@ -31,13 +32,11 @@ def clean_value(value):
     if 'NotApplicableValue' in value_type or 'NotAvailableValue' in value_type:
         return None
     
-    # Handle bytes
     if isinstance(value, bytes):
         return value.decode('utf-8', errors='ignore')
     
-    # Handle other types
     try:
-        json.dumps(value)  # Test if serializable
+        json.dumps(value)
         return value
     except (TypeError, ValueError):
         return str(value)
@@ -56,25 +55,14 @@ def setup_volatility_context(memory_file):
         # Initialize Volatility
         constants.PARALLELISM = constants.Parallelism.Off
         
-        # Set up the context
         ctx = contexts.Context()
         framework.require_interface_version(2, 0, 0)
         
-        # Configure automagics
         automagics = automagic.available(ctx)
         
-        # Set the memory file location - use proper URI format for Windows
+        # Set the memory file location
         abs_path = os.path.abspath(memory_file)
-        # Convert Windows path to proper file URI
-        if os.name == 'nt':  # Windows
-            # Replace backslashes and create proper file URI
-            abs_path = abs_path.replace('\\', '/')
-            if abs_path[1] == ':':  # Drive letter
-                single_location = f"file:///{abs_path}"
-            else:
-                single_location = f"file://{abs_path}"
-        else:  # Linux/Mac
-            single_location = f"file://{abs_path}"
+        single_location = Path(abs_path).as_uri()
         
         ctx.config['automagic.LayerStacker.single_location'] = single_location
         
@@ -83,37 +71,35 @@ def setup_volatility_context(memory_file):
         return ctx, automagics
         
     except Exception as e:
-        logger.error(f"Failed to setup Volatility context: {e}")
+        logger.error(f"Failed to setup Volatility context: {type(e).__name__}: {e}")
+        logger.debug(traceback.format_exc())
         return None, None
 
 
-def run_volatility_plugin(ctx, automagics, plugin_class, **kwargs):
+def run_volatility_plugin(ctx, automagics, plugin_class):
     """Run a Volatility plugin and return results.
     
     Args:
         ctx: Volatility context
         automagics: Automagic objects
         plugin_class: Plugin class to run
-        **kwargs: Additional plugin arguments
         
     Returns:
         list: Plugin results as list of dictionaries
     """
     try:
         # Create plugin instance
+        chosen_automagics = automagic.choose_automagic(automagics, plugin_class)
         plugin = plugins.construct_plugin(
-            ctx, automagics, plugin_class, 'plugins',
+            ctx, chosen_automagics, plugin_class, 'plugins',
             None, None
         )
         
-        # Run plugin and handle TreeGrid
         results = []
         treegrid = plugin.run()
         
-        # TreeGrid objects have _generator attribute with actual data
         if hasattr(treegrid, '_generator'):
             for level, item in treegrid._generator:
-                # Convert tuple to dict using clean_value
                 result_dict = {}
                 for i, value in enumerate(item):
                     result_dict[f'col_{i}'] = clean_value(value)
@@ -144,11 +130,10 @@ def detect_os_from_memory(memory_file):
         # Check for Windows signatures
         try:
             from volatility3.plugins.windows import info
-            plugin = plugins.construct_plugin(ctx, automagics, info.Info, 'plugins', None, None)
+            chosen = automagic.choose_automagic(automagics, info.Info)
+            plugin = plugins.construct_plugin(ctx, chosen, info.Info, 'plugins', None, None)
             treegrid = plugin.run()
-            # If we can create the plugin and it has a generator, it's likely Windows
             if hasattr(treegrid, '_generator'):
-                # Try to get at least one result
                 try:
                     next(iter(treegrid._generator))
                     logger.info("Detected Windows memory dump")
@@ -161,7 +146,8 @@ def detect_os_from_memory(memory_file):
         # Check for Linux signatures
         try:
             from volatility3.plugins.linux import pslist
-            plugin = plugins.construct_plugin(ctx, automagics, pslist.PsList, 'plugins', None, None)
+            chosen = automagic.choose_automagic(automagics, pslist.PsList)
+            plugin = plugins.construct_plugin(ctx, chosen, pslist.PsList, 'plugins', None, None)
             treegrid = plugin.run()
             if hasattr(treegrid, '_generator'):
                 try:
@@ -177,7 +163,8 @@ def detect_os_from_memory(memory_file):
         return 'unknown'
         
     except Exception as e:
-        logger.error(f"OS detection failed: {e}")
+        logger.error(f"OS detection failed: {type(e).__name__}: {e}")
+        logger.debug(traceback.format_exc())
         return 'unknown'
 
 
@@ -220,13 +207,12 @@ def analyze_windows_memory(memory_file):
         # Extract system info (hostname, OS version)
         logger.info("Extracting system information...")
         from volatility3.plugins.windows import info
-        plugin = plugins.construct_plugin(ctx, automagics, info.Info, 'plugins', None, None)
+        chosen = automagic.choose_automagic(automagics, info.Info)
+        plugin = plugins.construct_plugin(ctx, chosen, info.Info, 'plugins', None, None)
         treegrid = plugin.run()
         
         if hasattr(treegrid, '_generator'):
-            for level, item in treegrid._generator:
-                # Info plugin typically returns key-value pairs
-                # Look for ComputerName or similar fields
+            for _, item in treegrid._generator:
                 if len(item) >= 2:
                     key = str(clean_value(item[0])) if item[0] else ''
                     value = str(clean_value(item[1])) if item[1] else ''
@@ -236,7 +222,7 @@ def analyze_windows_memory(memory_file):
                         logger.info(f"Found hostname: {value}")
         
     except Exception as e:
-        logger.debug(f"System info extraction failed: {e}")
+        logger.debug(f"System info extraction failed: {type(e).__name__}: {e}")
     
     try:
         # Extract logged-in users (Windows Sessions)
@@ -244,14 +230,12 @@ def analyze_windows_memory(memory_file):
         from volatility3.plugins.windows import sessions
         import re
         
-        plugin = plugins.construct_plugin(ctx, automagics, sessions.Sessions, 'plugins', None, None)
+        plugin = plugins.construct_plugin(ctx, automagic.choose_automagic(automagics, sessions.Sessions), sessions.Sessions, 'plugins', None, None)
         treegrid = plugin.run()
         
         user_set = set()
         if hasattr(treegrid, '_generator'):
-            for level, item in treegrid._generator:
-                # Sessions columns typically include Username
-                # Extract username if available
+            for _, item in treegrid._generator:
                 if len(item) > 0:
                     for field in item:
                         field_str = str(clean_value(field))
@@ -307,13 +291,14 @@ def analyze_windows_memory(memory_file):
             logger.info(f"Found {len(results['logged_in_users'])} logged-in users")
         
     except Exception as e:
-        logger.debug(f"User session extraction not available: {e}")
+        logger.debug(f"User session extraction not available: {type(e).__name__}: {e}")
     
     try:
         # Process list
         logger.info("Extracting process list...")
         from volatility3.plugins.windows import pslist
-        plugin = plugins.construct_plugin(ctx, automagics, pslist.PsList, 'plugins', None, None)
+        chosen = automagic.choose_automagic(automagics, pslist.PsList)
+        plugin = plugins.construct_plugin(ctx, chosen, pslist.PsList, 'plugins', None, None)
         treegrid = plugin.run()
         
         # Get column names from TreeGrid
@@ -321,7 +306,7 @@ def analyze_windows_memory(memory_file):
         logger.debug(f"PsList columns: {column_names}")
         
         if hasattr(treegrid, '_generator'):
-            for level, item in treegrid._generator:
+            for _, item in treegrid._generator:
                 # Map columns by name instead of hardcoded indices
                 row_dict = {}
                 for i, col_name in enumerate(column_names):
@@ -346,8 +331,9 @@ def analyze_windows_memory(memory_file):
         logger.info(f"Found {len(results['processes'])} processes")
         
     except Exception as e:
-        error_msg = str(e)
+        error_msg = f"{type(e).__name__}: {e}"
         logger.error(f"Process list extraction failed: {error_msg}")
+        logger.debug(traceback.format_exc())
         
         # Check if this might be a Linux memory dump
         if 'Symbol table' in error_msg or 'No such file' in error_msg or 'layer' in error_msg.lower():
@@ -361,10 +347,10 @@ def analyze_windows_memory(memory_file):
         from volatility3.plugins.windows import netscan
         from collections import defaultdict
         
-        plugin = plugins.construct_plugin(ctx, automagics, netscan.NetScan, 'plugins', None, None)
+        plugin = plugins.construct_plugin(ctx, automagic.choose_automagic(automagics, netscan.NetScan), netscan.NetScan, 'plugins', None, None)
         treegrid = plugin.run()
         
-        suspicious_pids = set()  # Track PIDs with suspicious network activity
+        suspicious_pids = set() 
         ip_freq = defaultdict(int)
         port_freq = defaultdict(int)
         established_count = 0
@@ -453,64 +439,14 @@ def analyze_windows_memory(memory_file):
         logger.info(f"Flagged {len(suspicious_pids)} PIDs with suspicious network activity")
         
     except Exception as e:
-        logger.error(f"Process list extraction failed: {e}")
-    
-    try:
-        # Network connections
-        logger.info("Extracting network connections...")
-        from volatility3.plugins.windows import netscan
-        plugin = plugins.construct_plugin(ctx, automagics, netscan.NetScan, 'plugins', None, None)
-        treegrid = plugin.run()
-        
-        suspicious_pids = set()  # Track PIDs with suspicious network activity
-        
-        if hasattr(treegrid, '_generator'):
-            for level, item in treegrid._generator:
-                # NetScan columns: Offset, Proto, LocalAddr, LocalPort, ForeignAddr, ForeignPort, State, PID, Owner, Created
-                conn_info = {
-                    'protocol': str(clean_value(item[1])) if len(item) > 1 else 'Unknown',
-                    'local_addr': str(clean_value(item[2])) if len(item) > 2 else '',
-                    'local_port': clean_value(item[3]) if len(item) > 3 else 0,
-                    'foreign_addr': str(clean_value(item[4])) if len(item) > 4 else '',
-                    'foreign_port': clean_value(item[5]) if len(item) > 5 else 0,
-                    'state': str(clean_value(item[6])) if len(item) > 6 else '',
-                    'pid': clean_value(item[7]) if len(item) > 7 else 0,
-                    'owner': str(clean_value(item[8])) if len(item) > 8 else ''
-                }
-                results['network_connections'].append(conn_info)
-                
-                # Flag suspicious connections and track their PIDs
-                foreign_addr = conn_info['foreign_addr']
-                foreign_port = conn_info['foreign_port']
-                if foreign_addr not in ['', '0.0.0.0', '*', '::', '-', 'None'] and foreign_port:
-                    # Flag connections to unusual ports (not common HTTP, HTTPS, DNS, etc.)
-                    if foreign_port not in [80, 443, 53, 8080, 8443]:
-                        suspicious_pids.add(conn_info['pid'])
-                        results['suspicious_items'].append({
-                            'type': 'network',
-                            'pid': conn_info['pid'],
-                            'remote': f"{foreign_addr}:{foreign_port}",
-                            'reason': 'Unusual port connection'
-                        })
-        
-        # Flag processes with suspicious network activity
-        for proc in results['processes']:
-            if proc['pid'] in suspicious_pids:
-                # Check if not already in suspicious list (compare by PID)
-                if not any(p['pid'] == proc['pid'] for p in results['suspicious_processes']):
-                    results['suspicious_processes'].append(proc)
-        
-        logger.info(f"Found {len(results['network_connections'])} network connections")
-        logger.info(f"Flagged {len(suspicious_pids)} PIDs with suspicious network activity")
-        
-    except Exception as e:
-        logger.error(f"Network extraction failed: {e}")
+        logger.error(f"Network extraction failed: {type(e).__name__}: {e}")
+        logger.debug(traceback.format_exc())
     
     try:
         # Loaded modules/DLLs (limited to first 50 for performance)
         logger.info("Extracting loaded modules...")
         from volatility3.plugins.windows import dlllist
-        plugin = plugins.construct_plugin(ctx, automagics, dlllist.DllList, 'plugins', None, None)
+        plugin = plugins.construct_plugin(ctx, automagic.choose_automagic(automagics, dlllist.DllList), dlllist.DllList, 'plugins', None, None)
         treegrid = plugin.run()
         
         count = 0
@@ -533,7 +469,8 @@ def analyze_windows_memory(memory_file):
         logger.info(f"Found {len(results['loaded_modules'])} loaded modules")
         
     except Exception as e:
-        logger.error(f"Module extraction failed: {e}")
+        logger.error(f"Module extraction failed: {type(e).__name__}: {e}")
+        logger.debug(traceback.format_exc())
     
     return results
 
@@ -562,11 +499,12 @@ def analyze_linux_memory(memory_file):
         # Process list
         logger.info("Extracting Linux process list...")
         from volatility3.plugins.linux import pslist
-        plugin = plugins.construct_plugin(ctx, automagics, pslist.PsList, 'plugins', None, None)
+        chosen = automagic.choose_automagic(automagics, pslist.PsList)
+        plugin = plugins.construct_plugin(ctx, chosen, pslist.PsList, 'plugins', None, None)
         treegrid = plugin.run()
         
         if hasattr(treegrid, '_generator'):
-            for level, item in treegrid._generator:
+            for _, item in treegrid._generator:
                 # Linux PsList columns vary, but typically: Offset, PID, PPID, COMM
                 process_info = {
                     'pid': clean_value(item[1]) if len(item) > 1 else 0,
@@ -583,8 +521,9 @@ def analyze_linux_memory(memory_file):
         logger.info(f"Found {len(results['processes'])} processes")
         
     except Exception as e:
-        error_msg = str(e)
+        error_msg = f"{type(e).__name__}: {e}"
         logger.error(f"Linux process list extraction failed: {error_msg}")
+        logger.debug(traceback.format_exc())
         
         # Check if this might be a Windows memory dump
         if 'Unknown symbol' in error_msg or 'init_task' in error_msg:
@@ -605,6 +544,9 @@ def analyze_memory_dump(memory_file, os_type=None):
     Returns:
         dict: Comprehensive analysis results
     """
+    if not VOLATILITY_AVAILABLE:
+        return {'error': 'Volatility 3 is not installed. Run: pip install volatility3'}
+
     if not os.path.exists(memory_file):
         return {'error': f'Memory dump file not found: {memory_file}'}
     

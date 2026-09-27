@@ -4,15 +4,15 @@ Automated tool for preliminary forensic data analysis - disk images and memory d
 
 ## ✨ Features
 
-- 🔍 **Disk Image Analysis** - Supports RAW, E01, AFF formats
-- 💾 **Memory Dump Analysis** - Volatility 3 integration for Windows/Linux memory analysis
+- 🔍 **Disk Image Analysis** - Performs basic disk image analysis using `pytsk3`
+- 💾 **Memory Dump Analysis** - Analyzes selected Windows/Linux memory artifacts using Volatility 3
 - 📁 **Recursive Traversal** - Extracts metadata from all files and directories
-- 🔒 **YARA Scanning** - Detects problematic content using YARA rules
-- 🧠 **System Intelligence** - Extracts OS info, users, command history, and suspicious activity
-- 📊 **Log Analysis** - Parses authentication logs, detects login attempts, tracks user/IP frequency
-- 🪟 **Windows Event Logs** - Full parsing of Security and System logs
-- 🌐 **Network Intelligence** - Extracts network connections, detects brute force attacks
-- 🔐 **Login Tracking** - Analyzes successful/failed logins, SSH connections, sudo commands
+- 🔒 **YARA Scanning** - Scans file content using configurable YARA rules
+- 🧠 **System Intelligence** - Extracts OS information, user profiles, command history, and selected suspicious patterns
+- 📊 **Log Analysis** - Parses supported authentication and system logs and summarizes login and IP frequency
+- 🪟 **Windows Eventlogs** - Parses selected Security and System event records
+- 🌐 **Network Intelligence** - Extracts network-related events and identifies potential brute-force patterns
+- 🔐 **Login Tracking** - Summarizes successful/failed logins, SSH connections, and sudo commands
 - ⚡ **Quick Mode** - Analysis without YARA scanning
 - 📊 **Multiple Output Formats** - JSON, CSV, and table formats
 - 🔧 **Configurable** - Custom YARA rules, verbosity levels
@@ -52,6 +52,12 @@ The environment does not need to be activated manually when using `uv run`.
 
 ### Disk Analysis
 
+The disk analyzer uses `pytsk3` to open the image, detect a partition table or
+filesystem, and recursively extract file and directory metadata. YARA scanning
+is available as an optional additional step. Supported image and filesystem
+formats depend on the installed `pytsk3`/The Sleuth Kit build and should be
+verified with representative test images.
+
 ```bash
 # Full disk analysis (with YARA scanning)
 uv run python main.py disk image.dd
@@ -70,6 +76,10 @@ uv run python main.py disk image.dd --output table
 
 ### Memory Analysis
 
+Memory analysis uses Volatility 3 and currently targets selected Windows and
+Linux memory artifacts. The available results depend on the detected operating
+system and the Volatility plugins that can be run for the image.
+
 ```bash
 # Analyze memory dump (auto-detect OS)
 uv run python main.py memory dump.vmem
@@ -80,11 +90,14 @@ uv run python main.py memory dump.vmem --os-type linux
 
 # Different output formats
 uv run python main.py memory dump.vmem --output json
-uv run python main.py memory dump.vmem --output cvs
+uv run python main.py memory dump.vmem --output csv
 uv run python main.py memory dump.vmem --output table
 ```
 
-### Event Log Analysis
+### Eventlog Analysis
+
+The eventlog command parses selected Windows EventLog records, including
+login, logoff, security, and system events.
 
 ```bash
 # Analyze Windows Security log
@@ -95,22 +108,25 @@ uv run python main.py eventlog System.evtx
 
 # Output formats
 uv run python main.py eventlog Security.evtx --output json
-uv run python main.py eventlog Security.evtx --output cvs
+uv run python main.py eventlog Security.evtx --output csv
 uv run python main.py eventlog Security.evtx --output table
 ```
 
 ### Text Log Analysis (Linux/Mac)
 
+The text log command supports the authentication and system log patterns
+implemented in `log_analyzer.py`, such as `auth.log` and `syslog`.
+
 ```bash
 # Analyze authentication log
-uv run python main.py auth.log
+uv run python main.py logs auth.log
 
 # Analyze system log
-uv run python main.py syslog
+uv run python main.py logs syslog
 
 # Output formats
 uv run python main.py logs auth.log --output json
-uv run python main.py logs auth.log --output cvs
+uv run python main.py logs auth.log --output csv
 uv run python main.py logs auth.log --output table
 ```
 
@@ -136,7 +152,7 @@ ForensicAutoCLI
 ├── memory_analyzer.py      # Memory dump analysis (Volatility 3)
 ├── filesystem_parser.py    # File system parsing
 ├── system_intelligence.py  # OS detection, user profiles, command history
-├── log_analyzer.py         # Log file analysis (auth.log, syslog, event logs)
+├── log_analyzer.py         # Log file analysis (auth.log, syslog)
 ├── yara_scanner.py         # YARA scanning engine
 ├── output_formatter.py     # Output formatting (JSON, CSV, table)
 ├── validators.py           # Input validation

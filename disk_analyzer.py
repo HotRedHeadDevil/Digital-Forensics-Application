@@ -10,7 +10,7 @@ from log_analyzer import extract_log_intelligence
 logger = logging.getLogger(__name__)
 
 def analyze_disk_image(image_path, quick_mode=False, yara_rules_path=None):
-    """Analyzes disk image and optionally scans files with YARA.
+    """Performs basic disk image analysis using pytsk3 and optionally YARA.
     
     Args:
         image_path: Path to disk image

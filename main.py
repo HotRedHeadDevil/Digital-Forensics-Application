@@ -46,7 +46,7 @@ def cli(verbose):
 @click.option('--output', '-o', type=click.Choice(['json', 'csv', 'table'], case_sensitive=False),
               default='json', help='Output format (default: json)')
 def memory(filepath, os_type, output):
-    """Performs analysis of memory dump using Volatility 3.
+    """Analyzes memory dumps with Volatility 3.
     
     FILEPATH: Path to memory dump file (.raw, .mem, .dmp, .vmem, etc.)
     """
@@ -104,9 +104,9 @@ def memory(filepath, os_type, output):
 @click.option('--output', '-o', type=click.Choice(['json', 'csv', 'table'], case_sensitive=False),
               default='json', help='Output format (default: json)')
 def disk(filepath, yara_rules, quick, output):
-    """Performs basic analysis of disk image (RAW, E01, etc.).
+    """Analyzes disk images with pytsk3.
     
-    FILEPATH: Path to disk image file.
+    FILEPATH: Path to a disk image readable by pytsk3.
     """
     try:
         from disk_analyzer import analyze_disk_image
@@ -184,13 +184,13 @@ def disk(filepath, yara_rules, quick, output):
 @click.option('--output', '-o', type=click.Choice(['json', 'csv', 'table'], case_sensitive=False),
               default='json', help='Output format (default: json)')
 def eventlog(filepath, output):
-    """Analyzes Windows Event Log files (.evtx, .evt).
+    """Parses selected Windows event records.
     
-    FILEPATH: Path to event log file (Security.evtx, System.evtx, etc.)
+    FILEPATH: Path to eventlog file (Security.evtx, System.evtx)
     """
-    click.echo(f"Analyzing event log: {os.path.basename(filepath)}")
+    click.echo(f"Analyzing eventlog: {os.path.basename(filepath)}")
     
-    # Import event log parsing function
+    # Import eventlog parsing function
     from log_analyzer import parse_single_event_log
     
     # Parse the event log
@@ -263,9 +263,8 @@ def eventlog(filepath, output):
 @click.option('--output', '-o', type=click.Choice(['json', 'csv', 'table'], case_sensitive=False),
               default='json', help='Output format (default: json)')
 def logs(filepath, output):
-    """Analyzes Linux/Unix text log files (auth.log, syslog, secure, etc.).
-    
-    FILEPATH: Path to log file (/var/log/auth.log, /var/log/syslog, etc.)
+    """Parses supported Linux/Unix text logs.
+    FILEPATH: Path to a log file (auth.log, syslog).
     """
     click.echo(f"Analyzing log file: {os.path.basename(filepath)}")
     

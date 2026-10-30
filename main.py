@@ -86,11 +86,17 @@ def memory(filepath, os_type, output):
             "network_statistics": net_stats,
             "suspicious_processes": len(analysis_data.get('suspicious_processes', [])),
             "suspicious_items": len(analysis_data.get('suspicious_items', [])),
+            "suspicious_commands": len(analysis_data.get('suspicious_commands', [])),
             "processes": analysis_data.get('processes', []),
+            "process_tree": analysis_data.get('process_tree', []),
             "network": analysis_data.get('network_connections', []),
             "suspicious": analysis_data.get('suspicious_processes', []),
             "suspicious_findings": analysis_data.get('suspicious_items', []),
-            "modules": analysis_data.get('loaded_modules', [])
+            "suspicious_command_findings": analysis_data.get('suspicious_commands', []),
+            "modules": analysis_data.get('loaded_modules', []),
+            "kernel_modules": analysis_data.get('kernel_modules', []),
+            "shell_history": analysis_data.get('shell_history', []),
+            "plugin_errors": analysis_data.get('plugin_errors', [])
         }
     
     print_output(summary, format_type=output)

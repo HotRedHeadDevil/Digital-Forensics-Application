@@ -216,6 +216,13 @@ def format_memory_table(data):
     output.append(f"Total Processes: {data.get('process_count', 0)}")
     output.append(f"Network Connections: {data.get('network_connections', 0)}")
     output.append(f"Suspicious Findings: {data.get('suspicious_items', 0)}")
+    if data.get('os_type', '').lower() == 'linux':
+        output.append(f"Process Tree Entries: {len(data.get('process_tree', []))}")
+        output.append(f"Kernel Modules: {len(data.get('kernel_modules', []))}")
+        output.append(f"Shell History Entries: {len(data.get('shell_history', []))}")
+        output.append(f"Suspicious Commands: {data.get('suspicious_commands', 0)}")
+        if data.get('plugin_errors'):
+            output.append(f"Plugin Errors: {len(data['plugin_errors'])}")
     output.append("")
     
     # Print suspicious findings if any
@@ -233,6 +240,12 @@ def format_memory_table(data):
                 pid = item.get('pid', '?')
                 process_name = pid_to_name.get(pid, 'Unknown')
                 output.append(f"  [{item_type}] PID {pid} ({process_name}) -> {item.get('remote', '?')} - {item.get('reason', '')}")
+            elif item_type == 'COMMAND':
+                output.append(
+                    f"  [{item.get('severity', 'unknown').upper()}] "
+                    f"PID {item.get('pid', '?')} {item.get('command', '')} - "
+                    f"{item.get('reason', '')}"
+                )
             else:
                 output.append(f"  [{item_type}] {item.get('reason', 'Unknown')}")
         

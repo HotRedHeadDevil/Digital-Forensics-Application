@@ -4,12 +4,75 @@ import logging
 import os
 import sys
 import json
+import re
 import traceback
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
+SUSPICIOUS_COMMAND_RULES = (
+    (
+        re.compile(r"(?:curl|wget)\b[^\n|]*\|\s*(?:ba)?sh\b", re.IGNORECASE),
+        "Stažení obsahu a jeho okamžité spuštění shellem",
+        "high",
+    ),
+    (
+        re.compile(r"\b(?:nc|ncat|netcat)\b.*(?:\s-e|\s-e\s*/|\s-c\s+)", re.IGNORECASE),
+        "Možný reverzní shell přes netcat",
+        "high",
+    ),
+    (
+        re.compile(r"\brm\s+(?:-[^\n]*f[^\n]*r|-[^\n]*r[^\n]*f)\s+/(?:\s|$)", re.IGNORECASE),
+        "Mazání souborů z kořene systému pomocí rm -rf",
+        "critical",
+    ),
+    (
+        re.compile(r"\bchmod\s+(?:[4567]\d{2,3}|\+s)\b", re.IGNORECASE),
+        "Změna oprávnění umožňující zvýšení oprávnění",
+        "high",
+    ),
+    (
+        re.compile(r"\b(?:history\s+-c|unset\s+HISTFILE|export\s+HISTFILE\s*=\s*/dev/null|shred\b[^\n]*history)", re.IGNORECASE),
+        "Pokus o odstranění nebo potlačení historie příkazů",
+        "high",
+    ),
+    (
+        re.compile(r"\b(?:cat|less|more|grep)\b[^\n]*/etc/shadow\b", re.IGNORECASE),
+        "Přístup k souboru s hashi hesel",
+        "high",
+    ),
+    (
+        re.compile(r"\b(?:crontab\s+-[ei]|systemctl\s+(?:enable|start)|(?:>>|>)\s*[^\n]*(?:\.bashrc|\.profile|\.bash_profile))", re.IGNORECASE),
+        "Možná persistence po spuštění systému nebo přihlášení",
+        "medium",
+    ),
+    (
+        re.compile(r"\b(?:python|python3|perl|ruby|php)\s+(?:-c|-e)\b", re.IGNORECASE),
+        "Spuštění vloženého skriptu z příkazového řádku",
+        "medium",
+    ),
+    (
+        re.compile(r"\b(?:curl|wget)\b[^\n]*(?:/tmp|/var/tmp|/dev/shm)\b", re.IGNORECASE),
+        "Stažení souboru do dočasného nebo sdíleného adresáře",
+        "medium",
+    ),
+)
+
+
+def analyze_shell_command(command):
+    """Return suspicious-command findings for one shell command."""
+    command = command.strip()
+    findings = []
+    for pattern, reason, severity in SUSPICIOUS_COMMAND_RULES:
+        if pattern.search(command):
+            findings.append({"reason": reason, "severity": severity})
+    return findings
+
+
 try:
+    import volatility3
+    import volatility3.plugins
     from volatility3 import framework
     from volatility3.framework import contexts, automagic, plugins, constants
     
@@ -57,6 +120,10 @@ def setup_volatility_context(memory_file):
         
         ctx = contexts.Context()
         framework.require_interface_version(2, 0, 0)
+
+        # The CLI imports all plugins before selecting stackers.  Do the same
+        # here so LiME files receive the LimeLayer before Linux detection runs.
+        framework.import_files(volatility3.plugins, True)
         
         automagics = automagic.available(ctx)
         
@@ -487,8 +554,23 @@ def analyze_linux_memory(memory_file):
     results = {
         'os_type': 'linux',
         'processes': [],
+        'process_tree': [],
         'network_connections': [],
-        'suspicious_processes': []
+        'network_statistics': {
+            'total_connections': 0,
+            'established_connections': 0,
+            'listening_ports': 0,
+            'ip_frequency': {},
+            'port_frequency': {},
+            'top_remote_ips': [],
+            'top_local_ports': []
+        },
+        'suspicious_processes': [],
+        'suspicious_items': [],
+        'suspicious_commands': [],
+        'kernel_modules': [],
+        'shell_history': [],
+        'plugin_errors': []
     }
     
     ctx, automagics = setup_volatility_context(memory_file)
@@ -524,12 +606,217 @@ def analyze_linux_memory(memory_file):
         error_msg = f"{type(e).__name__}: {e}"
         logger.error(f"Linux process list extraction failed: {error_msg}")
         logger.debug(traceback.format_exc())
+        results['plugin_errors'].append({
+            'plugin': 'linux.pslist.PsList',
+            'error': error_msg
+        })
         
         # Check if this might be a Windows memory dump
         if 'Unknown symbol' in error_msg or 'init_task' in error_msg:
             logger.warning("⚠ This appears to be a Windows memory dump, not Linux!")
             logger.warning("Try running without --os-type to auto-detect, or specify --os-type windows")
             results['os_mismatch_warning'] = "This appears to be a Windows memory dump. Try --os-type windows or remove --os-type for auto-detection."
+
+    try:
+        # Process hierarchy
+        logger.info("Extracting Linux process tree...")
+        from volatility3.plugins.linux import pstree
+
+        chosen = automagic.choose_automagic(automagics, pstree.PsTree)
+        plugin = plugins.construct_plugin(
+            ctx, chosen, pstree.PsTree, 'plugins', None, None
+        )
+        treegrid = plugin.run()
+        column_names = [column.name for column in treegrid.columns]
+
+        if hasattr(treegrid, '_generator'):
+            for level, item in treegrid._generator:
+                row = {
+                    column_names[index]: clean_value(value)
+                    for index, value in enumerate(item)
+                    if index < len(column_names)
+                }
+                results['process_tree'].append({
+                    'level': level,
+                    'pid': row.get('PID', 0),
+                    'tid': row.get('TID', 0),
+                    'ppid': row.get('PPID', 0),
+                    'name': str(row.get('COMM', 'Unknown'))
+                })
+
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
+        logger.warning(f"Linux process tree extraction failed: {error_msg}")
+        logger.debug(traceback.format_exc())
+        results['plugin_errors'].append({
+            'plugin': 'linux.pstree.PsTree',
+            'error': error_msg
+        })
+
+    try:
+        # Network sockets
+        logger.info("Extracting Linux network sockets...")
+        from collections import Counter
+        from volatility3.plugins.linux import sockstat
+
+        chosen = automagic.choose_automagic(automagics, sockstat.Sockstat)
+        plugin = plugins.construct_plugin(
+            ctx, chosen, sockstat.Sockstat, 'plugins', None, None
+        )
+        treegrid = plugin.run()
+        column_names = [column.name for column in treegrid.columns]
+        remote_ips = Counter()
+        local_ports = Counter()
+
+        if hasattr(treegrid, '_generator'):
+            for _, item in treegrid._generator:
+                row = {
+                    column_names[index]: clean_value(value)
+                    for index, value in enumerate(item)
+                    if index < len(column_names)
+                }
+                connection = {
+                    'protocol': str(row.get('Proto', 'Unknown')),
+                    'local_addr': str(row.get('Source Addr', '')),
+                    'local_port': row.get('Source Port', ''),
+                    'foreign_addr': str(row.get('Destination Addr', '')),
+                    'foreign_port': row.get('Destination Port', ''),
+                    'state': str(row.get('State', '')),
+                    'pid': row.get('PID', 0),
+                    'owner': str(row.get('Process Name', ''))
+                }
+                results['network_connections'].append(connection)
+
+                state = connection['state'].upper()
+                if state == 'ESTABLISHED':
+                    results['network_statistics']['established_connections'] += 1
+                if state in ('LISTEN', 'LISTENING'):
+                    results['network_statistics']['listening_ports'] += 1
+                if connection['foreign_addr'] not in ('', 'None', '0.0.0.0', '::'):
+                    remote_ips[connection['foreign_addr']] += 1
+                if connection['local_port'] not in ('', None, 'None'):
+                    local_ports[str(connection['local_port'])] += 1
+
+        results['network_statistics']['total_connections'] = len(
+            results['network_connections']
+        )
+        results['network_statistics']['ip_frequency'] = dict(remote_ips)
+        results['network_statistics']['port_frequency'] = dict(local_ports)
+        results['network_statistics']['top_remote_ips'] = [
+            {'ip': ip, 'count': count}
+            for ip, count in remote_ips.most_common(10)
+        ]
+        results['network_statistics']['top_local_ports'] = [
+            {'port': port, 'count': count}
+            for port, count in local_ports.most_common(10)
+        ]
+
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
+        logger.warning(f"Linux network socket extraction failed: {error_msg}")
+        logger.debug(traceback.format_exc())
+        results['plugin_errors'].append({
+            'plugin': 'linux.sockstat.Sockstat',
+            'error': error_msg
+        })
+
+    try:
+        # Loaded kernel modules
+        logger.info("Extracting Linux kernel modules...")
+        from volatility3.plugins.linux import lsmod
+
+        chosen = automagic.choose_automagic(automagics, lsmod.Lsmod)
+        plugin = plugins.construct_plugin(
+            ctx, chosen, lsmod.Lsmod, 'plugins', None, None
+        )
+        treegrid = plugin.run()
+        column_names = [column.name for column in treegrid.columns]
+
+        if hasattr(treegrid, '_generator'):
+            for _, item in treegrid._generator:
+                row = {
+                    column_names[index]: clean_value(value)
+                    for index, value in enumerate(item)
+                    if index < len(column_names)
+                }
+                results['kernel_modules'].append({
+                    'name': str(row.get('Module Name', '')),
+                    'size': row.get('Code Size'),
+                    'taints': row.get('Taints'),
+                    'load_arguments': row.get('Load Arguments'),
+                    'file': row.get('File Output')
+                })
+
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
+        logger.warning(f"Linux kernel module extraction failed: {error_msg}")
+        logger.debug(traceback.format_exc())
+        results['plugin_errors'].append({
+            'plugin': 'linux.lsmod.Lsmod',
+            'error': error_msg
+        })
+
+    try:
+        # Bash command history
+        logger.info("Extracting Linux shell history...")
+        from volatility3.plugins.linux import bash
+
+        chosen = automagic.choose_automagic(automagics, bash.Bash)
+        plugin = plugins.construct_plugin(
+            ctx, chosen, bash.Bash, 'plugins', None, None
+        )
+        treegrid = plugin.run()
+        column_names = [column.name for column in treegrid.columns]
+
+        if hasattr(treegrid, '_generator'):
+            for _, item in treegrid._generator:
+                row = {
+                    column_names[index]: clean_value(value)
+                    for index, value in enumerate(item)
+                    if index < len(column_names)
+                }
+                results['shell_history'].append({
+                    'pid': row.get('PID', 0),
+                    'process': str(row.get('Process', '')),
+                    'time': row.get('CommandTime'),
+                    'command': str(row.get('Command', '')),
+                })
+                history_entry = results['shell_history'][-1]
+                command_findings = analyze_shell_command(history_entry['command'])
+                if command_findings:
+                    history_entry['suspicious'] = True
+                    history_entry['suspicious_reasons'] = [
+                        finding['reason'] for finding in command_findings
+                    ]
+                    history_entry['severity'] = max(
+                        command_findings,
+                        key=lambda finding: (
+                            {'critical': 3, 'high': 2, 'medium': 1}.get(
+                                finding['severity'], 0
+                            )
+                        )
+                    )['severity']
+                    for finding in command_findings:
+                        suspicious_command = {
+                            'type': 'command',
+                            'pid': history_entry['pid'],
+                            'process': history_entry['process'],
+                            'time': history_entry['time'],
+                            'command': history_entry['command'],
+                            'reason': finding['reason'],
+                            'severity': finding['severity'],
+                        }
+                        results['suspicious_commands'].append(suspicious_command)
+                        results['suspicious_items'].append(suspicious_command)
+
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
+        logger.warning(f"Linux shell history extraction failed: {error_msg}")
+        logger.debug(traceback.format_exc())
+        results['plugin_errors'].append({
+            'plugin': 'linux.bash.Bash',
+            'error': error_msg
+        })
     
     return results
 

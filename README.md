@@ -78,7 +78,18 @@ uv run python main.py disk image.dd --output table
 
 Memory analysis uses Volatility 3 and currently targets selected Windows and
 Linux memory artifacts. The available results depend on the detected operating
-system and the Volatility plugins that can be run for the image.
+system and the Volatility plugins that can be run for the image. Windows
+analysis includes system information, sessions, processes, network connections,
+and loaded DLLs. Linux analysis includes processes, a process tree, network
+sockets, loaded kernel modules, and recovered Bash history when the required
+kernel symbols and memory structures are available. Recovered Bash commands
+are checked for suspicious patterns such as reverse shells, download-and-execute
+pipelines, history removal, credential-file access, persistence, and dangerous
+permission or file operations. Findings are available in the
+`suspicious_command_findings` result and include the command, reason, and
+severity. Individual Linux plugin
+failures are reported in the `plugin_errors` result while the remaining
+plugins continue to run.
 
 ```bash
 # Analyze memory dump (auto-detect OS)

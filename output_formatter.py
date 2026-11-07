@@ -179,6 +179,194 @@ def _format_csv_login_events(data):
     return output.getvalue()
 
 
+_SEVERITY_RANK = {'critical': 3, 'high': 2, 'medium': 1, 'low': 0}
+
+
+def _format_command_findings(findings):
+    """Render suspicious commands, one block per unique command.
+
+    Accepts both grouped findings (with pids/times/records) and raw
+    per-record findings; raw ones are grouped here so duplicates never
+    reach the output.
+    """
+    if findings and 'pids' not in findings[0]:
+        from memory_analyzer import group_suspicious_commands
+        findings = group_suspicious_commands(findings)
+
+    total_records = sum(f.get('records', 1) for f in findings)
+    lines = ["-" * 110,
+             f"SUSPICIOUS COMMANDS ({len(findings)} unique, {total_records} records)",
+             "-" * 110]
+
+    for f in sorted(findings, key=lambda f: -_SEVERITY_RANK.get(f.get('severity'), 0)):
+        lines.append(f"[{f.get('severity', 'unknown').upper()}] {f.get('command', '')}")
+        reasons = f.get('reasons') or [f.get('reason', '')]
+        for reason in reasons:
+            lines.append(f"    Reason : {reason}")
+        lines.append(f"    Records: {f.get('records', 1)}")
+        if f.get('sources'):
+            lines.append(f"    Source : {'; '.join(f['sources'])}")
+        if f.get('by_pid'):
+            for entry in f['by_pid']:
+                parts = [f"{t['time']} ({t['count']}x)" if t['time'] else f"({t['count']}x)"
+                         for t in entry['times']]
+                lines.append(f"    PID {str(entry['pid']):<6}: " + parts[0])
+                for part in parts[1:]:
+                    lines.append(f"    {'':<10}  {part}")
+        else:
+            pids = ', '.join(str(p) for p in f.get('pids', [])) or '?'
+            lines.append(f"    PIDs   : {pids}")
+            for i, t in enumerate(f.get('times', [])):
+                lines.append(f"    {'Times' if i == 0 else '':<7}: {t}")
+        lines.append("")
+    return lines
+
+
+def _format_linux_network(data):
+    """Summarise Linux sockets; list only inet sockets worth reading."""
+    conns = data.get('network') or []
+    if not conns:
+        return []
+
+    def family(c):
+        fam = (c.get('family') or '').upper()
+        if fam:
+            return fam
+        # Older results without family: guess from the address shape
+        return 'AF_INET' if ('.' in str(c.get('local_addr', '')) and '/' not in str(c.get('local_addr', ''))) else 'OTHER'
+
+    inet = [c for c in conns if family(c) in ('AF_INET', 'AF_INET6')]
+    by_family = {}
+    for c in conns:
+        by_family[family(c)] = by_family.get(family(c), 0) + 1
+
+    lines = ["-" * 110, "NETWORK CONNECTIONS", "-" * 110,
+             f"Total sockets: {len(conns)}  (" +
+             ", ".join(f"{k}: {v}" for k, v in sorted(by_family.items(), key=lambda kv: -kv[1])) + ")"]
+
+    stats = data.get('network_statistics', {})
+    lines.append(f"Established: {stats.get('established_connections', 0)}   "
+                 f"Listening: {stats.get('listening_ports', 0)}")
+    top_ips = stats.get('top_remote_ips') or []
+    if top_ips:
+        lines.append("Top remote IPs: " + ", ".join(f"{i['ip']} ({i['count']})" for i in top_ips[:5]))
+    lines.append("")
+
+    if not inet:
+        lines.append("No TCP/UDP (AF_INET/AF_INET6) sockets found; "
+                     "Unix and netlink sockets omitted (see JSON output).")
+        lines.append("")
+        return lines
+
+    pid_to_name = {p.get('pid'): p.get('name', '?') for p in data.get('processes', [])}
+    lines.append(f"{'Proto':<7} {'Local Address':<26} {'Foreign Address':<26} {'State':<13} {'PID':<7} Process")
+    lines.append("-" * 110)
+    limit = 40
+    for c in inet[:limit]:
+        local = f"{c.get('local_addr', '')}:{c.get('local_port', '')}"
+        foreign = f"{c.get('foreign_addr', '')}:{c.get('foreign_port', '')}"
+        name = c.get('owner') or pid_to_name.get(c.get('pid'), '')
+        lines.append(f"{str(c.get('protocol', ''))[:6]:<7} {local[:25]:<26} {foreign[:25]:<26} "
+                     f"{str(c.get('state', ''))[:12]:<13} {str(c.get('pid', '')):<7} {name}")
+    if len(inet) > limit:
+        lines.append(f"... and {len(inet) - limit} more TCP/UDP sockets")
+    lines.append(f"(Unix/netlink sockets omitted: {len(conns) - len(inet)}; use --output json)")
+    lines.append("")
+    return lines
+
+
+def _format_linux_processes(data):
+    """List user-space processes as a tree; hide kernel threads (children of kthreadd)."""
+    procs = data.get('processes') or []
+    if not procs:
+        return []
+
+    by_pid = {p.get('pid'): p for p in procs}
+    kernel = {p['pid'] for p in procs if p.get('pid') == 2 or p.get('ppid') == 2}
+    user = [p for p in procs if p.get('pid') not in kernel]
+
+    lines = ["-" * 110, f"PROCESSES ({len(user)} user-space, {len(kernel)} kernel threads hidden)", "-" * 110]
+
+    children = {}
+    for p in user:
+        children.setdefault(p.get('ppid'), []).append(p)
+    user_pids = {p['pid'] for p in user}
+    roots = [p for p in user if p.get('ppid') not in user_pids or p.get('ppid') == p.get('pid')]
+
+    suspicious = {s.get('pid') for s in data.get('suspicious') or []}
+    lines.append(f"{'PID':<8} {'PPID':<8} Name")
+    lines.append("-" * 110)
+
+    shown = 0
+    limit = 80
+    seen = set()
+
+    def walk(p, depth):
+        nonlocal shown
+        if p['pid'] in seen or shown >= limit:
+            return
+        seen.add(p['pid'])
+        mark = '  <-- suspicious name' if p['pid'] in suspicious else ''
+        lines.append(f"{str(p['pid']):<8} {str(p.get('ppid', '')):<8} {'  ' * depth}{p.get('name', '?')}{mark}")
+        shown += 1
+        for child in sorted(children.get(p['pid'], []), key=lambda c: c['pid']):
+            walk(child, depth + 1)
+
+    for root in sorted(roots, key=lambda p: p['pid']):
+        walk(root, 0)
+    if len(user) > shown:
+        lines.append(f"... and {len(user) - shown} more processes (use JSON output for complete list)")
+    lines.append("")
+    return lines
+
+
+def _format_generic_network(data):
+    """Original flat network table (Windows)."""
+    lines = []
+    if data.get('network'):
+        lines += ["-" * 110, "NETWORK CONNECTIONS", "-" * 110]
+        lines.append(f"{'Protocol':<10} {'Local Address':<25} {'Foreign Address':<25} {'State':<15} {'PID':<8}")
+        lines.append("-" * 110)
+        for conn in data['network'][:30]:
+            protocol = str(conn.get('protocol', 'Unknown'))[:9]
+            local = f"{conn.get('local_addr', '')}:{conn.get('local_port', 0)}"[:24]
+            foreign = f"{conn.get('foreign_addr', '')}:{conn.get('foreign_port', 0)}"[:24]
+            state = str(conn.get('state', 'N/A'))[:14]
+            lines.append(f"{protocol:<10} {local:<25} {foreign:<25} {state:<15} {conn.get('pid', 0):<8}")
+        if len(data['network']) > 30:
+            lines.append(f"\n... and {len(data['network']) - 30} more connections")
+        lines.append("")
+    return lines
+
+
+def _format_generic_processes(data):
+    """Original flat process table (Windows)."""
+    lines = []
+    if data.get('processes'):
+        lines += ["-" * 110, "RUNNING PROCESSES (First 30)", "-" * 110]
+        lines.append(f"{'PID':<8} {'PPID':<8} {'Name':<40} {'Threads':<10} {'Handles':<10}")
+        lines.append("-" * 110)
+        for proc in data['processes'][:30]:
+            lines.append(f"{proc.get('pid', 0) or 0:<8} {proc.get('ppid', 0) or 0:<8} "
+                         f"{str(proc.get('name', 'Unknown'))[:39]:<40} "
+                         f"{proc.get('threads', 0) or 0:<10} {proc.get('handles', 0) or 0:<10}")
+        if len(data['processes']) > 30:
+            lines.append(f"\n... and {len(data['processes']) - 30} more processes (use JSON output for complete list)")
+        lines.append("")
+    return lines
+
+
+def _format_plugin_errors(data):
+    errors = data.get('plugin_errors') or []
+    if not errors:
+        return []
+    lines = ["-" * 110, "PLUGIN ERRORS", "-" * 110]
+    for e in errors:
+        lines.append(f"  {e.get('plugin', '?')}: {e.get('error', '')}")
+    lines.append("")
+    return lines
+
+
 def format_memory_table(data):
     """Format memory dump analysis as ASCII table.
     
@@ -207,7 +395,7 @@ def format_memory_table(data):
     # Check for OS mismatch warning
     if data.get('os_mismatch_warning'):
         output.append("")
-        output.append("⚠️  WARNING: POSSIBLE OS TYPE MISMATCH")
+        output.append("WARNING: POSSIBLE OS TYPE MISMATCH")
         output.append("-" * 110)
         output.append(f"   {data['os_mismatch_warning']}")
         output.append("-" * 110)
@@ -216,115 +404,91 @@ def format_memory_table(data):
     output.append(f"Total Processes: {data.get('process_count', 0)}")
     output.append(f"Network Connections: {data.get('network_connections', 0)}")
     output.append(f"Suspicious Findings: {data.get('suspicious_items', 0)}")
+    unique_cmds = data.get('suspicious_commands', 0)
+    raw_cmds = data.get('suspicious_command_records', unique_cmds)
     if data.get('os_type', '').lower() == 'linux':
         output.append(f"Process Tree Entries: {len(data.get('process_tree', []))}")
         output.append(f"Kernel Modules: {len(data.get('kernel_modules', []))}")
         output.append(f"Shell History Entries: {len(data.get('shell_history', []))}")
-        output.append(f"Suspicious Commands: {data.get('suspicious_commands', 0)}")
-        if data.get('plugin_errors'):
-            output.append(f"Plugin Errors: {len(data['plugin_errors'])}")
+    else:
+        output.append(f"Command History Entries: {len(data.get('shell_history', []))}")
+    output.append(f"Suspicious Commands: {unique_cmds} unique ({raw_cmds} records)")
+    if data.get('plugin_errors'):
+        output.append(f"Plugin Errors: {len(data['plugin_errors'])}")
     output.append("")
     
     # Print suspicious findings if any
-    if data.get('suspicious_findings') and len(data['suspicious_findings']) > 0:
-        output.append("-" * 110)
-        output.append("⚠ SUSPICIOUS FINDINGS")
-        output.append("-" * 110)
-        
+    findings = data.get('suspicious_findings') or []
+    command_findings = [f for f in findings if f.get('type') == 'command']
+    other_findings = [f for f in findings if f.get('type') != 'command']
+
+    output.append("-" * 110)
+    output.append("SUSPICIOUS NETWORK CONNECTIONS")
+    output.append("-" * 110)
+    if other_findings:
         # Create a PID to process name mapping
         pid_to_name = {p.get('pid'): p.get('name', 'Unknown') for p in data.get('processes', [])}
-        
-        for item in data['suspicious_findings'][:20]:
+
+        for item in other_findings[:20]:
             item_type = item.get('type', 'unknown').upper()
             if item_type == 'NETWORK':
                 pid = item.get('pid', '?')
                 process_name = pid_to_name.get(pid, 'Unknown')
                 output.append(f"  [{item_type}] PID {pid} ({process_name}) -> {item.get('remote', '?')} - {item.get('reason', '')}")
-            elif item_type == 'COMMAND':
-                output.append(
-                    f"  [{item.get('severity', 'unknown').upper()}] "
-                    f"PID {item.get('pid', '?')} {item.get('command', '')} - "
-                    f"{item.get('reason', '')}"
-                )
             else:
                 output.append(f"  [{item_type}] {item.get('reason', 'Unknown')}")
-        
-        if len(data['suspicious_findings']) > 20:
-            output.append(f"  ... and {len(data['suspicious_findings']) - 20} more")
+
+        if len(other_findings) > 20:
+            output.append(f"  ... and {len(other_findings) - 20} more")
+    else:
+        output.append("  No suspicious network connections found.")
+    output.append("")
+
+    if command_findings:
+        output.extend(_format_command_findings(command_findings))
+    else:
+        output.extend(["-" * 110, "SUSPICIOUS COMMANDS", "-" * 110,
+                       "  No suspicious commands found.", ""])
+    for note in data.get('notes') or []:
+        output.append(f"  Note: {note}")
+    if data.get('notes'):
         output.append("")
-    
+
     # Print suspicious processes if any
     if data.get('suspicious') and len(data['suspicious']) > 0:
         output.append("-" * 110)
         output.append("SUSPICIOUS PROCESSES")
         output.append("-" * 110)
         
-        header = f"{'PID':<8} {'PPID':<8} {'Name':<30} {'Threads':<10} {'Handles':<10}"
+        linux_proc = data.get('os_type', '').lower() == 'linux'
+        header = f"{'PID':<8} {'PPID':<8} {'Name':<30}"
+        if not linux_proc:
+            header += f" {'Threads':<10} {'Handles':<10}"
+        header += " Reason"
         output.append(header)
         output.append("-" * 110)
-        
+
         for proc in data['suspicious'][:20]:  # Limit to first 20
-            pid = proc.get('pid', 0)
-            ppid = proc.get('ppid', 0)
-            name = proc.get('name', 'Unknown')[:29]
-            threads = proc.get('threads', 0)
-            handles = proc.get('handles', 0)
-            
-            row = f"{pid:<8} {ppid:<8} {name:<30} {threads:<10} {handles:<10}"
+            row = f"{proc.get('pid') or 0:<8} {proc.get('ppid') or 0:<8} {str(proc.get('name', 'Unknown'))[:29]:<30}"
+            if not linux_proc:
+                row += f" {proc.get('threads') or 0:<10} {proc.get('handles') or 0:<10}"
+            row += " " + "; ".join(proc.get('reasons', []))
             output.append(row)
-        
+
         if len(data['suspicious']) > 20:
             output.append(f"\n... and {len(data['suspicious']) - 20} more suspicious processes")
         output.append("")
     
-    # Print network connections if any
-    if data.get('network') and len(data['network']) > 0:
-        output.append("-" * 110)
-        output.append("NETWORK CONNECTIONS")
-        output.append("-" * 110)
-        
-        header = f"{'Protocol':<10} {'Local Address':<25} {'Foreign Address':<25} {'State':<15} {'PID':<8}"
-        output.append(header)
-        output.append("-" * 110)
-        
-        for conn in data['network'][:30]:  # Limit to first 30
-            protocol = conn.get('protocol', 'Unknown')[:9]
-            local = f"{conn.get('local_addr', '')}:{conn.get('local_port', 0)}"[:24]
-            foreign = f"{conn.get('foreign_addr', '')}:{conn.get('foreign_port', 0)}"[:24]
-            state = conn.get('state', 'N/A')[:14]
-            pid = conn.get('pid', 0)
-            
-            row = f"{protocol:<10} {local:<25} {foreign:<25} {state:<15} {pid:<8}"
-            output.append(row)
-        
-        if len(data['network']) > 30:
-            output.append(f"\n... and {len(data['network']) - 30} more connections")
-        output.append("")
-    
-    # Print process list (limited)
-    if data.get('processes') and len(data['processes']) > 0:
-        output.append("-" * 110)
-        output.append("RUNNING PROCESSES (First 30)")
-        output.append("-" * 110)
-        
-        header = f"{'PID':<8} {'PPID':<8} {'Name':<40} {'Threads':<10} {'Handles':<10}"
-        output.append(header)
-        output.append("-" * 110)
-        
-        for proc in data['processes'][:30]:
-            pid = proc.get('pid', 0) or 0
-            ppid = proc.get('ppid', 0) or 0
-            name = proc.get('name', 'Unknown')[:39]
-            threads = proc.get('threads', 0) or 0
-            handles = proc.get('handles', 0) or 0
-            
-            row = f"{pid:<8} {ppid:<8} {name:<40} {threads:<10} {handles:<10}"
-            output.append(row)
-        
-        if len(data['processes']) > 30:
-            output.append(f"\n... and {len(data['processes']) - 30} more processes (use JSON output for complete list)")
-        output.append("")
-    
+    is_linux = data.get('os_type', '').lower() == 'linux'
+    if is_linux:
+        output.extend(_format_linux_network(data))
+        output.extend(_format_linux_processes(data))
+    else:
+        output.extend(_format_generic_network(data))
+        output.extend(_format_generic_processes(data))
+
+    output.extend(_format_plugin_errors(data))
+
     output.append("=" * 110)
     
     return '\n'.join(output)

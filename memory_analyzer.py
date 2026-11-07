@@ -14,60 +14,266 @@ logger = logging.getLogger(__name__)
 SUSPICIOUS_COMMAND_RULES = (
     (
         re.compile(r"(?:curl|wget)\b[^\n|]*\|\s*(?:ba)?sh\b", re.IGNORECASE),
-        "Stažení obsahu a jeho okamžité spuštění shellem",
+        "Downloads content and pipes it straight into a shell",
         "high",
     ),
     (
         re.compile(r"\b(?:nc|ncat|netcat)\b.*(?:\s-e|\s-e\s*/|\s-c\s+)", re.IGNORECASE),
-        "Možný reverzní shell přes netcat",
+        "Possible reverse shell via netcat",
         "high",
     ),
     (
         re.compile(r"\brm\s+(?:-[^\n]*f[^\n]*r|-[^\n]*r[^\n]*f)\s+/(?:\s|$)", re.IGNORECASE),
-        "Mazání souborů z kořene systému pomocí rm -rf",
+        "Recursive deletion from the filesystem root (rm -rf /)",
         "critical",
     ),
     (
         re.compile(r"\bchmod\s+(?:[4567]\d{2,3}|\+s)\b", re.IGNORECASE),
-        "Změna oprávnění umožňující zvýšení oprávnění",
+        "Permission change that enables privilege escalation (setuid/setgid)",
         "high",
     ),
     (
         re.compile(r"\b(?:history\s+-c|unset\s+HISTFILE|export\s+HISTFILE\s*=\s*/dev/null|shred\b[^\n]*history)", re.IGNORECASE),
-        "Pokus o odstranění nebo potlačení historie příkazů",
+        "Attempt to clear or suppress command history",
         "high",
     ),
     (
         re.compile(r"\b(?:cat|less|more|grep)\b[^\n]*/etc/shadow\b", re.IGNORECASE),
-        "Přístup k souboru s hashi hesel",
+        "Access to the password hash file (/etc/shadow)",
         "high",
     ),
     (
         re.compile(r"\b(?:crontab\s+-[ei]|systemctl\s+(?:enable|start)|(?:>>|>)\s*[^\n]*(?:\.bashrc|\.profile|\.bash_profile))", re.IGNORECASE),
-        "Možná persistence po spuštění systému nebo přihlášení",
+        "Possible persistence via cron, systemd or login scripts",
         "medium",
     ),
     (
         re.compile(r"\b(?:python|python3|perl|ruby|php)\s+(?:-c|-e)\b", re.IGNORECASE),
-        "Spuštění vloženého skriptu z příkazového řádku",
+        "Inline script run from the command line",
         "medium",
     ),
     (
         re.compile(r"\b(?:curl|wget)\b[^\n]*(?:/tmp|/var/tmp|/dev/shm)\b", re.IGNORECASE),
-        "Stažení souboru do dočasného nebo sdíleného adresáře",
+        "File downloaded into a temporary or shared directory",
         "medium",
     ),
 )
 
 
-def analyze_shell_command(command):
-    """Return suspicious-command findings for one shell command."""
+# Program started from a folder where users and downloads land (not a system folder)
+USER_WRITABLE_REASON = "Program started from Desktop, Downloads or a temp folder"
+USER_WRITABLE_PATH_RE = re.compile(
+    r"^\W*[a-z]:\\(?:users\\[^\\]+\\(?:desktop|downloads|appdata\\local\\temp)|windows\\temp|users\\public)\\",
+    re.IGNORECASE,
+)
+
+WINDOWS_COMMAND_RULES = (
+    (
+        re.compile(r"\bpowershell(?:\.exe)?\b.*\s-(?:e|en|enc|enco|encodedcommand)\b", re.IGNORECASE),
+        "PowerShell with an encoded command",
+        "high",
+    ),
+    (
+        re.compile(r"\b(?:iex|invoke-expression|invoke-webrequest|iwr)\b|downloadstring|downloadfile|net\.webclient", re.IGNORECASE),
+        "PowerShell downloads or runs content from the internet",
+        "high",
+    ),
+    (
+        re.compile(r"\bpowershell(?:\.exe)?\b.*-(?:w|windowstyle)\s+hidden", re.IGNORECASE),
+        "PowerShell with a hidden window",
+        "medium",
+    ),
+    (
+        re.compile(r"\bcertutil(?:\.exe)?\b.*-(?:urlcache|decode|encode)", re.IGNORECASE),
+        "certutil used to download or decode a file",
+        "high",
+    ),
+    (
+        re.compile(r"\bbitsadmin(?:\.exe)?\b.*/transfer", re.IGNORECASE),
+        "File download via BITS",
+        "high",
+    ),
+    (
+        re.compile(r"\b(?:mshta|regsvr32|rundll32)(?:\.exe)?\b.*(?:https?://|javascript:|scrobj)", re.IGNORECASE),
+        "Remote script run through a system tool (mshta/regsvr32/rundll32)",
+        "high",
+    ),
+    (
+        re.compile(r"\bnet1?(?:\.exe)?\s+(?:user\b.*\s/add\b|localgroup\s+administrators\b.*\s/add\b)", re.IGNORECASE),
+        "User account created or added to administrators",
+        "high",
+    ),
+    (
+        re.compile(r"\bvssadmin(?:\.exe)?\b.*delete\s+shadows|\bwbadmin(?:\.exe)?\b.*delete|\bbcdedit(?:\.exe)?\b.*recoveryenabled\s+no", re.IGNORECASE),
+        "Backups or shadow copies deleted",
+        "critical",
+    ),
+    (
+        re.compile(r"\bwevtutil(?:\.exe)?\b.*\bcl\b|\bclear-eventlog\b", re.IGNORECASE),
+        "Event logs cleared",
+        "high",
+    ),
+    (
+        re.compile(r"\bschtasks(?:\.exe)?\b.*\s/create\b", re.IGNORECASE),
+        "Scheduled task created (persistence)",
+        "medium",
+    ),
+    (
+        re.compile(r"\breg(?:\.exe)?\s+add\b.*\\run(?:once)?\b", re.IGNORECASE),
+        "Run registry key modified (persistence)",
+        "medium",
+    ),
+    (
+        re.compile(r"\bmimikatz|sekurlsa|\bprocdump\b.*lsass|comsvcs\.dll.*minidump", re.IGNORECASE),
+        "Credential dumping tool",
+        "critical",
+    ),
+    (
+        re.compile(r"\bnc(?:at)?(?:\.exe)?\b.*\s-e\b", re.IGNORECASE),
+        "Possible reverse shell via netcat",
+        "high",
+    ),
+    (
+        re.compile(r"\bwmic(?:\.exe)?\b.*process\s+call\s+create", re.IGNORECASE),
+        "Process started via WMI",
+        "medium",
+    ),
+    (
+        re.compile(r"\bicacls\b.*\s/grant\s+everyone:f\b.*\s/t\b", re.IGNORECASE),
+        "Full access granted to everyone recursively (icacls Everyone:F)",
+        "high",
+    ),
+    (
+        USER_WRITABLE_PATH_RE,
+        USER_WRITABLE_REASON,
+        "medium",
+    ),
+)
+
+# Windows process anomaly heuristics ("know normal, find evil")
+EXPECTED_PARENTS = {
+    'smss.exe': {'system'},
+    'services.exe': {'wininit.exe'},
+    'lsass.exe': {'wininit.exe'},
+    'lsm.exe': {'wininit.exe'},
+    'svchost.exe': {'services.exe'},
+    'spoolsv.exe': {'services.exe'},
+    'taskhost.exe': {'services.exe'},
+    'taskhostw.exe': {'services.exe'},
+    'wmiprvse.exe': {'svchost.exe'},
+    'dllhost.exe': {'svchost.exe', 'services.exe'},
+}
+SINGLETON_PROCESSES = frozenset({'lsass.exe', 'services.exe', 'wininit.exe', 'lsm.exe'})
+SYSTEM_BINARIES = frozenset({
+    'svchost.exe', 'lsass.exe', 'csrss.exe', 'services.exe', 'smss.exe', 'winlogon.exe',
+    'wininit.exe', 'spoolsv.exe', 'taskhost.exe', 'taskhostw.exe', 'dllhost.exe',
+    'wmiprvse.exe', 'conhost.exe', 'lsm.exe',
+})
+LOOKALIKE_TARGETS = ('svchost', 'lsass', 'csrss', 'services', 'winlogon', 'wininit',
+                     'spoolsv', 'explorer', 'taskhost', 'taskhostw', 'dllhost',
+                     'conhost', 'wmiprvse', 'audiodg')
+DOCUMENT_APPS = frozenset({'winword.exe', 'excel.exe', 'powerpnt.exe', 'outlook.exe',
+                           'acrord32.exe', 'acrobat.exe', 'onenote.exe'})
+SCRIPT_HOSTS = frozenset({'cmd.exe', 'powershell.exe', 'wscript.exe', 'cscript.exe',
+                          'mshta.exe', 'rundll32.exe', 'regsvr32.exe'})
+SYSTEM_PATH_RE = re.compile(r"^(?:\\\?\?\\)?[a-z]:\\windows\\(?:system32|syswow64)\\(?:wbem\\)?[^\\]+$")
+
+SUSPICIOUS_PROCESS_NAMES = frozenset({
+    'nc', 'ncat', 'netcat', 'socat', 'perl', 'python', 'python3', 'ruby', 'php',
+})
+
+
+def analyze_shell_command(command, rules=SUSPICIOUS_COMMAND_RULES):
+    """Return suspicious-command findings for one command (Linux rules by default)."""
     command = command.strip()
     findings = []
-    for pattern, reason, severity in SUSPICIOUS_COMMAND_RULES:
+    for pattern, reason, severity in rules:
         if pattern.search(command):
             findings.append({"reason": reason, "severity": severity})
     return findings
+
+
+_SEVERITY_ORDER = {'critical': 3, 'high': 2, 'medium': 1, 'low': 0}
+
+
+def group_suspicious_commands(findings):
+    """Collapse duplicate suspicious-command records into unique findings.
+
+    The Volatility bash plugin returns the same history line several times
+    (once per heap copy and once per bash process), and one command can match
+    several rules. Records are grouped by the normalized command text; each
+    group keeps every reason, the highest severity, the PIDs, the distinct
+    timestamps and the number of raw records it replaces.
+
+    Args:
+        findings: list of dicts with command, reason, severity, pid, time
+
+    Returns:
+        list: unique findings sorted by severity (highest first), then by
+        first-seen time
+    """
+    groups = {}
+    for item in findings:
+        command = ' '.join(str(item.get('command', '')).split())
+        group = groups.setdefault(command, {
+            'type': 'command',
+            'command': command,
+            'reasons': [],
+            'severity': 'low',
+            'pids': [],
+            'processes': [],
+            'times': [],
+            'sources': [],
+            '_hits': 0,
+            '_pid_times': {},
+        })
+        reason = item.get('reason')
+        if reason and reason not in group['reasons']:
+            group['reasons'].append(reason)
+        severity = item.get('severity', 'low')
+        if _SEVERITY_ORDER.get(severity, 0) > _SEVERITY_ORDER.get(group['severity'], 0):
+            group['severity'] = severity
+        pid = item.get('pid')
+        if pid not in (None, '') and pid not in group['pids']:
+            group['pids'].append(pid)
+        process = item.get('process')
+        if process and process not in group['processes']:
+            group['processes'].append(process)
+        time = item.get('time')
+        if time not in (None, '') and str(time) not in group['times']:
+            group['times'].append(str(time))
+        source = item.get('source')
+        if source and source not in group['sources']:
+            group['sources'].append(source)
+        group['_hits'] += 1
+        key = (pid, str(time) if time not in (None, '') else '')
+        group['_pid_times'][key] = group['_pid_times'].get(key, 0) + 1
+
+    result = []
+    for group in groups.values():
+        hits = group.pop('_hits')
+        # One command matching N rules produced N records per history line.
+        group['records'] = max(1, hits // max(1, len(group['reasons'])))
+        # Per-PID breakdown: how many records carry which timestamp
+        n_reasons = max(1, len(group['reasons']))
+        by_pid = {}
+        for (pid, time), count in group.pop('_pid_times').items():
+            by_pid.setdefault(pid, []).append(
+                {'time': time, 'count': max(1, count // n_reasons)}
+            )
+        group['by_pid'] = [
+            {'pid': pid, 'times': sorted(entries, key=lambda e: e['time'])}
+            for pid, entries in sorted(by_pid.items(), key=lambda kv: str(kv[0]))
+        ]
+        group['pids'].sort(key=str)
+        group['times'].sort()
+        group['reason'] = '; '.join(group['reasons'])
+        result.append(group)
+
+    result.sort(key=lambda g: (-_SEVERITY_ORDER.get(g['severity'], 0),
+                               g['times'][0] if g['times'] else '',
+                               g['command']))
+    return result
 
 
 try:
@@ -235,6 +441,260 @@ def detect_os_from_memory(memory_file):
         return 'unknown'
 
 
+def _plugin_rows(ctx, automagics, plugin_class):
+    """Run a Volatility plugin and yield each row as {column name: value}."""
+    chosen = automagic.choose_automagic(automagics, plugin_class)
+    plugin = plugins.construct_plugin(ctx, chosen, plugin_class, 'plugins', None, None)
+    treegrid = plugin.run()
+    column_names = [column.name for column in treegrid.columns]
+    if hasattr(treegrid, '_generator'):
+        for _, item in treegrid._generator:
+            row = {}
+            for index, value in enumerate(item):
+                if index >= len(column_names):
+                    break
+                type_name = type(value).__name__
+                if any(tag in type_name for tag in ('Unreadable', 'NotApplicable', 'NotAvailable')):
+                    value = None
+                row[column_names[index]] = clean_value(value)
+            yield row
+
+
+def extract_windows_commands(ctx, automagics, results):
+    """Collect Windows command lines and console history, flag suspicious ones.
+
+    Sources: windows.cmdline (command line of every process) and
+    windows.cmdscan / windows.consoles (commands typed into a console; these
+    two only support Windows 10 and newer and are skipped quietly otherwise).
+    The console plugins report the console host PID (conhost.exe/csrss.exe),
+    so the application (e.g. cmd.exe) is read from the history entry itself
+    and console hosts are never flagged as suspicious processes.
+    """
+    from collections import Counter
+
+    merged = {}  # (pid, process, command) -> [count, {sources}]
+    skipped = []  # console plugins skipped because the Windows version is unsupported
+
+    def merge(local, source):
+        for key, count in local.items():
+            entry = merged.setdefault(key, [0, set()])
+            entry[0] = max(entry[0], count)
+            entry[1].add(source)
+
+    # Command line of every process
+    try:
+        from volatility3.plugins.windows import cmdline
+        local = Counter()
+        for row in _plugin_rows(ctx, automagics, cmdline.CmdLine):
+            command = ' '.join(str(row.get('Args') or '').split())
+            if command:
+                local[(row.get('PID'), str(row.get('Process', '')), command)] += 1
+        merge(local, 'cmdline')
+    except Exception as e:
+        logger.warning(f"Windows command line extraction failed: {type(e).__name__}: {e}")
+        logger.debug(traceback.format_exc())
+        results['plugin_errors'].append({'plugin': 'windows.cmdline.CmdLine',
+                                         'error': f"{type(e).__name__}: {e}"})
+
+    # Commands typed into a console
+    from volatility3.plugins.windows import cmdscan, consoles
+    for plugin_class, source in ((cmdscan.CmdScan, 'cmdscan'), (consoles.Consoles, 'consoles')):
+        try:
+            # The plugins would otherwise re-open the registry hives to read
+            # the console history size; those layers already exist in this
+            # context ("Layer already exists"), so use the plugin defaults.
+            ctx.config[f'plugins.{plugin_class.__name__}.no_registry'] = True
+            local = Counter()
+            application = {}
+            for row in _plugin_rows(ctx, automagics, plugin_class):
+                prop = str(row.get('Property') or '')
+                key = (row.get('PID'), row.get('ConsoleInfo'))
+                data = ' '.join(str(row.get('Data') or '').split())
+                if prop.endswith('Application'):
+                    application[key] = data
+                elif '_Command_' in prop and data:
+                    process = application.get(key) or str(row.get('Process', ''))
+                    local[(row.get('PID'), process, data)] += 1
+            merge(local, source)
+        except NotImplementedError as e:
+            # The Volatility 3 console plugins only support Windows 10 and
+            # newer. On older systems (e.g. Windows 7) this is expected and
+            # not an error: those dumps simply have no console history here.
+            logger.info(f"Windows {source} skipped (unsupported Windows version): {e}")
+            skipped.append(source)
+        except Exception as e:
+            logger.warning(f"Windows {source} extraction failed: {type(e).__name__}: {e}")
+            logger.debug(traceback.format_exc())
+            results['plugin_errors'].append({'plugin': f'windows.{source}',
+                                             'error': f"{type(e).__name__}: {e}"})
+
+    if skipped:
+        results.setdefault('notes', []).append(
+            f"Console history ({'/'.join(skipped)}) is not available for this Windows "
+            "version (Volatility supports Windows 10 and newer only); "
+            "only process command lines were checked.")
+
+    suspicious = []
+    for (pid, process, command), (count, sources) in sorted(
+            merged.items(), key=lambda kv: (str(kv[0][0]), kv[0][2])):
+        source = ', '.join(sorted(sources))
+        for _ in range(count):
+            results['shell_history'].append({
+                'pid': pid, 'process': process, 'time': None,
+                'command': command, 'source': source,
+            })
+            for finding in analyze_shell_command(command, WINDOWS_COMMAND_RULES):
+                suspicious.append({
+                    'type': 'command', 'pid': pid, 'process': process, 'time': None,
+                    'command': command, 'source': f"{source} ({process})",
+                    'reason': finding['reason'], 'severity': finding['severity'],
+                })
+                if 'cmdline' in sources:
+                    flag_suspicious_process(results, pid, finding['reason'])
+
+    results['suspicious_commands'] = group_suspicious_commands(suspicious)
+    results['suspicious_command_records'] = sum(
+        finding['records'] for finding in results['suspicious_commands'])
+    results['suspicious_items'].extend(results['suspicious_commands'])
+    logger.info(f"Found {len(results['shell_history'])} Windows commands, "
+                f"{len(results['suspicious_commands'])} suspicious")
+
+
+def extract_windows_hidden_processes(ctx, automagics, results):
+    """Find processes that psscan sees but pslist does not.
+
+    pslist walks the live process list, so terminated processes (a ransomware
+    helper that already exited) and processes unlinked by a rootkit are
+    missing from it; psscan scans memory for process structures instead.
+    """
+    from volatility3.plugins.windows import psscan
+
+    known = {(p['pid'], p['name']) for p in results['processes']}
+    hidden = []
+    for row in _plugin_rows(ctx, automagics, psscan.PsScan):
+        pid, name = row.get('PID'), str(row.get('ImageFileName') or '')
+        if (pid, name) in known:
+            continue
+        hidden.append({
+            'pid': pid,
+            'ppid': row.get('PPID'),
+            'name': name,
+            'threads': row.get('Threads'),
+            'handles': row.get('Handles'),
+            'created': str(row.get('CreateTime') or ''),
+            'exited': str(row.get('ExitTime') or ''),
+        })
+    hidden.sort(key=lambda p: p['created'])
+    results['hidden_processes'] = hidden
+    logger.info(f"Found {len(hidden)} processes only visible to psscan")
+
+
+def _is_lookalike(name, target):
+    """True if name differs from target by one edit or one adjacent swap."""
+    if name == target:
+        return False
+    if len(name) == len(target):
+        diffs = [i for i in range(len(name)) if name[i] != target[i]]
+        if len(diffs) == 1:
+            return True
+        return (len(diffs) == 2 and diffs[1] == diffs[0] + 1
+                and name[diffs[0]] == target[diffs[1]] and name[diffs[1]] == target[diffs[0]])
+    if abs(len(name) - len(target)) == 1:
+        longer, shorter = (name, target) if len(name) > len(target) else (target, name)
+        return any(longer[:i] + longer[i + 1:] == shorter for i in range(len(longer)))
+    return False
+
+
+def _executable_path(command):
+    """Return the executable path at the start of a command line, or ''."""
+    lowered = command.lower()
+    end = lowered.find('.exe')
+    if end == -1:
+        return ''
+    return command[:end + 4].strip(' "')
+
+
+def flag_suspicious_process_behavior(results):
+    """Flag Windows processes by behaviour instead of by known names.
+
+    Checks the usual "know normal, find evil" anomalies: system processes with
+    the wrong parent, duplicated singleton processes, look-alike names,
+    system binaries running outside System32, processes unlinked from the
+    process list, Office/PDF apps starting script hosts, programs running
+    from user-writable folders and the children those programs start.
+    """
+    running = results['processes']
+    hidden = results.get('hidden_processes', [])
+    everything = running + hidden
+    by_pid = {}
+    for proc in everything:
+        by_pid.setdefault(proc['pid'], proc)
+    lower = lambda proc: str(proc.get('name', '')).lower()
+
+    # Command line per PID (only the cmdline plugin reports the real process)
+    cmdlines = {}
+    for entry in results.get('shell_history', []):
+        if 'cmdline' in str(entry.get('source', '')):
+            cmdlines[entry['pid']] = entry['command']
+
+    # Processes unlinked from the process list but never exited
+    for proc in hidden:
+        if not proc.get('exited'):
+            flag_suspicious_process(results, proc['pid'], 'Hidden from process list (no exit time)')
+
+    counts = {}
+    for proc in running:
+        counts[lower(proc)] = counts.get(lower(proc), 0) + 1
+
+    for proc in everything:
+        name = lower(proc)
+        base = name[:-4] if name.endswith('.exe') else name
+        parent = by_pid.get(proc.get('ppid'))
+        parent_name = lower(parent) if parent else None
+
+        # System process started by the wrong parent (only when the parent is known)
+        expected = EXPECTED_PARENTS.get(name)
+        if expected and parent_name and parent_name not in expected:
+            flag_suspicious_process(
+                results, proc['pid'],
+                f"Unexpected parent {parent.get('name')} for {proc.get('name')}")
+
+        if name in SINGLETON_PROCESSES and counts.get(name, 0) > 1 and proc in running:
+            flag_suspicious_process(results, proc['pid'], f"Duplicate {proc.get('name')} process")
+
+        # Look-alike of a system process name
+        if len(base) >= 5 and base not in LOOKALIKE_TARGETS:
+            for target in LOOKALIKE_TARGETS:
+                if _is_lookalike(base, target):
+                    flag_suspicious_process(
+                        results, proc['pid'], f"Name resembles system process {target}.exe")
+                    break
+
+        # Office/PDF reader starting a shell or script host
+        if parent_name in DOCUMENT_APPS and name in SCRIPT_HOSTS:
+            flag_suspicious_process(
+                results, proc['pid'], f"{proc.get('name')} started by {parent.get('name')}")
+
+        command = cmdlines.get(proc['pid'])
+        if command:
+            if name in SYSTEM_BINARIES:
+                path = _executable_path(command)
+                normalized = path.lower().replace('%systemroot%', 'c:\\windows').replace('\\systemroot', 'c:\\windows')
+                if '\\' in path and not SYSTEM_PATH_RE.match(normalized):
+                    flag_suspicious_process(
+                        results, proc['pid'], f"{proc.get('name')} runs outside System32: {path}")
+                if name == 'svchost.exe' and ' -k' not in command.lower():
+                    flag_suspicious_process(results, proc['pid'], 'svchost.exe without -k argument')
+
+            # Program in a user-writable folder, and what it started
+            if USER_WRITABLE_PATH_RE.match(command):
+                for child in everything:
+                    if child.get('ppid') == proc['pid'] and child['pid'] != proc['pid']:
+                        flag_suspicious_process(
+                            results, child['pid'],
+                            f"Child of {proc.get('name')}, which runs from a user-writable folder")
+
+
 def analyze_windows_memory(memory_file):
     """Analyze Windows memory dump.
     
@@ -263,6 +723,10 @@ def analyze_windows_memory(memory_file):
         },
         'suspicious_processes': [],
         'suspicious_items': [], 
+        'suspicious_commands': [],
+        'shell_history': [],
+        'plugin_errors': [],
+        'notes': [],
         'loaded_modules': []
     }
     
@@ -393,7 +857,7 @@ def analyze_windows_memory(memory_file):
                 # Flag suspicious processes
                 name_lower = process_info['name'].lower() if process_info['name'] else ''
                 if any(sus in name_lower for sus in ['cmd.exe', 'powershell', 'wscript', 'mshta', 'nc.exe', 'mimikatz']):
-                    results['suspicious_processes'].append(process_info)
+                    flag_suspicious_process(results, process_info['pid'], 'Suspicious process name')
         
         logger.info(f"Found {len(results['processes'])} processes")
         
@@ -404,7 +868,7 @@ def analyze_windows_memory(memory_file):
         
         # Check if this might be a Linux memory dump
         if 'Symbol table' in error_msg or 'No such file' in error_msg or 'layer' in error_msg.lower():
-            logger.warning("⚠ This might be a Linux memory dump, not Windows!")
+            logger.warning("This might be a Linux memory dump, not Windows!")
             logger.warning("Try running without --os-type to auto-detect, or specify --os-type linux")
             results['os_mismatch_warning'] = "This might be a Linux memory dump. Try --os-type linux or remove --os-type for auto-detection."
     
@@ -461,7 +925,8 @@ def analyze_windows_memory(memory_file):
                     port_freq[foreign_port] += 1
                 
                 # Flag suspicious connections and track their PIDs
-                if foreign_addr not in ['', '0.0.0.0', '*', '::', '-', 'None'] and foreign_port:
+                if (foreign_addr not in ['', '0.0.0.0', '*', '::', '-', 'None']
+                        and not _is_loopback(foreign_addr) and foreign_port):
                     # Flag connections to unusual ports (not common HTTP, HTTPS, DNS, etc.)
                     if foreign_port not in [80, 443, 53, 8080, 8443]:
                         suspicious_pids.add(conn_info['pid'])
@@ -494,11 +959,8 @@ def analyze_windows_memory(memory_file):
         ]
         
         # Flag processes with suspicious network activity
-        for proc in results['processes']:
-            if proc['pid'] in suspicious_pids:
-                # Check if not already in suspicious list (compare by PID)
-                if not any(p['pid'] == proc['pid'] for p in results['suspicious_processes']):
-                    results['suspicious_processes'].append(proc)
+        for pid in sorted(suspicious_pids, key=str):
+            flag_suspicious_process(results, pid, 'Unusual port connection')
         
         logger.info(f"Found {len(results['network_connections'])} network connections")
         logger.info(f"Network stats: {established_count} established, {listening_count} listening")
@@ -538,8 +1000,59 @@ def analyze_windows_memory(memory_file):
     except Exception as e:
         logger.error(f"Module extraction failed: {type(e).__name__}: {e}")
         logger.debug(traceback.format_exc())
-    
+
+    try:
+        logger.info("Running psscan...")
+        extract_windows_hidden_processes(ctx, automagics, results)
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
+        logger.warning(f"Windows psscan failed: {error_msg}")
+        logger.debug(traceback.format_exc())
+        results['plugin_errors'].append({'plugin': 'windows.psscan', 'error': error_msg})
+
+    try:
+        logger.info("Extracting Windows command history...")
+        extract_windows_commands(ctx, automagics, results)
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
+        logger.warning(f"Windows command extraction failed: {error_msg}")
+        logger.debug(traceback.format_exc())
+        results['plugin_errors'].append({'plugin': 'windows commands', 'error': error_msg})
+
+    flag_suspicious_process_behavior(results)
     return results
+
+
+def _is_loopback(address):
+    """True for the machine's own address (127.0.0.0/8, ::1); such traffic never leaves the host."""
+    address = str(address)
+    return address.startswith('127.') or address == '::1'
+
+
+def flag_suspicious_process(results, pid, reason):
+    """Add a process to results['suspicious_processes'] (once) and record why.
+
+    A process can be suspicious for several reasons (name, network, command
+    history), so reasons are collected on one entry per PID instead of
+    adding the process several times.
+    """
+    for flagged in results['suspicious_processes']:
+        if flagged['pid'] == pid:
+            reasons = flagged.setdefault('reasons', [])
+            if reason not in reasons:
+                reasons.append(reason)
+            return
+    for proc in results['processes']:
+        if proc['pid'] == pid:
+            results['suspicious_processes'].append(dict(proc, reasons=[reason]))
+            return
+    for proc in results.get('hidden_processes', []):
+        if proc['pid'] == pid:
+            reasons = [reason]
+            if proc.get('exited'):
+                reasons.append('Not in process list (exited)')
+            results['suspicious_processes'].append(dict(proc, reasons=reasons))
+            return
 
 
 def analyze_linux_memory(memory_file):
@@ -585,21 +1098,30 @@ def analyze_linux_memory(memory_file):
         plugin = plugins.construct_plugin(ctx, chosen, pslist.PsList, 'plugins', None, None)
         treegrid = plugin.run()
         
+        column_names = [column.name for column in treegrid.columns]
+
         if hasattr(treegrid, '_generator'):
             for _, item in treegrid._generator:
-                # Linux PsList columns vary, but typically: Offset, PID, PPID, COMM
+                # linux.pslist columns: OFFSET, PID, TID, PPID, COMM, ...
+                # Look values up by column name; positional indexes shift
+                # whenever the plugin adds a column (e.g. TID), which put
+                # TID into PPID and PPID into the name column.
+                row = {
+                    column_names[index]: clean_value(value)
+                    for index, value in enumerate(item)
+                    if index < len(column_names)
+                }
                 process_info = {
-                    'pid': clean_value(item[1]) if len(item) > 1 else 0,
-                    'ppid': clean_value(item[2]) if len(item) > 2 else 0,
-                    'name': str(clean_value(item[3])) if len(item) > 3 else 'Unknown'
+                    'pid': row.get('PID', 0),
+                    'ppid': row.get('PPID', 0),
+                    'name': str(row.get('COMM', 'Unknown'))
                 }
                 results['processes'].append(process_info)
-                
-                # Flag suspicious processes
-                name_lower = process_info['name'].lower()
-                if any(sus in name_lower for sus in ['nc', 'ncat', 'bash', 'sh', 'perl', 'python', 'ruby']):
-                    results['suspicious_processes'].append(process_info)
-        
+
+                # Flag suspicious processes (exact names, not substrings)
+                if process_info['name'].lower() in SUSPICIOUS_PROCESS_NAMES:
+                    flag_suspicious_process(results, process_info['pid'], 'Suspicious process name')
+
         logger.info(f"Found {len(results['processes'])} processes")
         
     except Exception as e:
@@ -613,7 +1135,7 @@ def analyze_linux_memory(memory_file):
         
         # Check if this might be a Windows memory dump
         if 'Unknown symbol' in error_msg or 'init_task' in error_msg:
-            logger.warning("⚠ This appears to be a Windows memory dump, not Linux!")
+            logger.warning("This appears to be a Windows memory dump, not Linux!")
             logger.warning("Try running without --os-type to auto-detect, or specify --os-type windows")
             results['os_mismatch_warning'] = "This appears to be a Windows memory dump. Try --os-type windows or remove --os-type for auto-detection."
 
@@ -676,6 +1198,8 @@ def analyze_linux_memory(memory_file):
                     if index < len(column_names)
                 }
                 connection = {
+                    'family': str(row.get('Family', '') or ''),
+                    'type': str(row.get('Type', '') or ''),
                     'protocol': str(row.get('Proto', 'Unknown')),
                     'local_addr': str(row.get('Source Addr', '')),
                     'local_port': row.get('Source Port', ''),
@@ -687,15 +1211,35 @@ def analyze_linux_memory(memory_file):
                 }
                 results['network_connections'].append(connection)
 
+                # Flag established TCP connections to remote hosts on unusual ports
+                if (connection['family'].upper() in ('AF_INET', 'AF_INET6')
+                        and connection['protocol'].upper() == 'TCP'
+                        and connection['state'].upper() == 'ESTABLISHED'
+                        and connection['foreign_addr'] not in ('', 'None', '0.0.0.0', '::')
+                        and not _is_loopback(connection['foreign_addr'])
+                        and connection['foreign_port'] not in (80, 443, 53, 8080, 8443)):
+                    remote = f"{connection['foreign_addr']}:{connection['foreign_port']}"
+                    flag_suspicious_process(
+                        results, connection['pid'], f'Unusual port connection to {remote}')
+                    results['suspicious_items'].append({
+                        'type': 'network',
+                        'pid': connection['pid'],
+                        'remote': remote,
+                        'reason': 'Unusual port connection'
+                    })
+
                 state = connection['state'].upper()
                 if state == 'ESTABLISHED':
                     results['network_statistics']['established_connections'] += 1
                 if state in ('LISTEN', 'LISTENING'):
                     results['network_statistics']['listening_ports'] += 1
-                if connection['foreign_addr'] not in ('', 'None', '0.0.0.0', '::'):
-                    remote_ips[connection['foreign_addr']] += 1
-                if connection['local_port'] not in ('', None, 'None'):
-                    local_ports[str(connection['local_port'])] += 1
+                # Count only TCP/UDP endpoints; unix/netlink "addresses" are
+                # socket paths and inode numbers, not IPs and ports.
+                if connection['family'].upper() in ('AF_INET', 'AF_INET6'):
+                    if connection['foreign_addr'] not in ('', 'None', '0.0.0.0', '::'):
+                        remote_ips[connection['foreign_addr']] += 1
+                    if connection['local_port'] not in ('', None, 'None'):
+                        local_ports[str(connection['local_port'])] += 1
 
         results['network_statistics']['total_connections'] = len(
             results['network_connections']
@@ -817,6 +1361,21 @@ def analyze_linux_memory(memory_file):
             'plugin': 'linux.bash.Bash',
             'error': error_msg
         })
+
+    # Collapse duplicate history records into unique findings
+    results['suspicious_commands'] = group_suspicious_commands(
+        results['suspicious_commands']
+    )
+    results['suspicious_command_records'] = sum(
+        finding['records'] for finding in results['suspicious_commands'])
+    results['suspicious_items'] = [
+        item for item in results['suspicious_items'] if item.get('type') != 'command'
+    ] + results['suspicious_commands']
+
+    # Shells whose history contains suspicious commands are suspicious processes
+    for finding in results['suspicious_commands']:
+        for pid in finding['pids']:
+            flag_suspicious_process(results, pid, 'Suspicious command in history')
     
     return results
 

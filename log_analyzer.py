@@ -218,11 +218,18 @@ def _parse_login_event_xml(root, event_id):
         elif event_id == 4625:
             failure_reason = event_data.get('FailureReason', '')
             status = event_data.get('Status', '')
-            if failure_reason:
+            if failure_reason and not failure_reason.startswith('%%'):
                 result['failure_reason'] = failure_reason
             elif status:
                 result['failure_reason'] = f"Status: {status}"
         
+        # A failed logon is evidence even when Windows did not record the account name
+        # (TargetUserName is "-"), so keep it instead of dropping it
+        if event_id == 4625 and not result.get('user'):
+            result['user'] = '(unknown account)'
+        if event_id == 4625 and event_data.get('LogonType'):
+            result['logon_type'] = event_data['LogonType']
+
         return result if result.get('user') else None
         
     except Exception as e:
@@ -313,6 +320,17 @@ def parse_standalone_log(filepath):
             'ip_addresses': set()
         }
         
+        # sshd writes "Invalid user X" once per connection and then a "Failed password for
+        # invalid user X" line for every attempt. Connections that have the latter are
+        # counted from those lines only, so each attempt is counted exactly once.
+        invalid_pw_pids = set()
+        if result['log_type'] == 'authentication':
+            with open(filepath, 'r', errors='ignore') as f:
+                for raw in f:
+                    m = re.search(r'sshd\[(\d+)\]:\s+Failed password for invalid user', raw)
+                    if m:
+                        invalid_pw_pids.add(m.group(1))
+
         with open(filepath, 'r', errors='ignore') as f:
             for line in f:
                 result['total_lines'] += 1
@@ -334,6 +352,7 @@ def parse_standalone_log(filepath):
                                 'user': user,
                                 'ip_address': ip,
                                 'method': 'publickey' if 'publickey' in line else 'password',
+                                'service': 'ssh',
                                 'log_line': line
                             })
                             login_events['user_frequency'][user] += 1
@@ -349,19 +368,25 @@ def parse_standalone_log(filepath):
                                 'user': user,
                                 'ip_address': ip,
                                 'reason': 'failed_password',
+                                'invalid_user': 'for invalid user' in line,
+                                'service': 'ssh',
                                 'log_line': line
                             })
                             login_events['user_frequency'][user] += 1
                             login_events['ip_frequency'][ip] += 1
                         # Invalid user
                         elif 'Invalid user' in line:
-                            match = re.search(r'Invalid user (\S+) from ([\d\.]+)', line)
+                            match = re.search(r'sshd\[(\d+)\]:\s+Invalid user (\S+) from ([\d\.]+)', line)
+                            if match and match.group(1) in invalid_pw_pids:
+                                match = None   # its attempts are counted from the "Failed password" lines
                             if match:
-                                user, ip = match.groups()
+                                _, user, ip = match.groups()
                                 login_events['failed_logins'].append({
                                     'user': user,
                                     'ip_address': ip,
                                     'reason': 'invalid_user',
+                                    'invalid_user': True,
+                                    'service': 'ssh',
                                     'log_line': line
                                 })
                                 login_events['user_frequency'][user] += 1
@@ -463,14 +488,12 @@ def _detect_security_threats_textlog(login_events):
     # Check for failed login attempts
     if failed_logins:
         # First, identify invalid user attempts
-        invalid_users = [e for e in failed_logins if e.get('reason') == 'invalid_user']
+        invalid_users = [e for e in failed_logins
+                         if e.get('invalid_user') or e.get('reason') == 'invalid_user']
         
-        # Group by IP (excluding invalid user attempts to avoid duplication)
+        # Group by IP: every attempt counts once (each attempt is a single failed_logins entry)
         failed_by_ip = defaultdict(list)
         for event in failed_logins:
-            # Skip invalid user attempts as they'll be reported separately
-            if event.get('reason') == 'invalid_user':
-                continue
             ip = event.get('ip_address', '-')
             if ip != '-':
                 failed_by_ip[ip].append(event)
@@ -710,6 +733,9 @@ def parse_auth_log(fs, file_list):
                 
                 logger.info(f"Parsing {log_path}...")
                 
+                # Connections with "Failed password for invalid user" lines are counted from those
+                invalid_pw_pids = set(re.findall(r'sshd\[(\d+)\]:\s+Failed\s+password\s+for\s+invalid\s+user', text))
+
                 for line in text.split('\n'):
                     if not line.strip():
                         continue
@@ -743,10 +769,10 @@ def parse_auth_log(fs, file_list):
                         auth_data['ip_frequency'][ip] += 1
                     
                     # Invalid user attempts (common in brute force attacks)
-                    invalid_user = re.search(r'Invalid user\s+(\S+)\s+from\s+([\d.]+)', line)
-                    if invalid_user:
-                        user = invalid_user.group(1)
-                        ip = invalid_user.group(2)
+                    invalid_user = re.search(r'sshd\[(\d+)\]:\s+Invalid user\s+(\S+)\s+from\s+([\d.]+)', line)
+                    if invalid_user and invalid_user.group(1) not in invalid_pw_pids:
+                        user = invalid_user.group(2)
+                        ip = invalid_user.group(3)
                         auth_data['failed_logins'].append({
                             'user': user,
                             'ip': ip,

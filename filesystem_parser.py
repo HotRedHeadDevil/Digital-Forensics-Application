@@ -8,6 +8,9 @@ logger = logging.getLogger(__name__)
 
 SKIP_DIRS = ['.', '..']
 SYSTEM_FILES = ['$MBR', '$FAT1', '$FAT2', '$OrphanFiles']
+# NTFS metadata files in the volume root (not user data; $RECYCLE.BIN is kept)
+NTFS_METAFILES = {'$AttrDef', '$BadClus', '$Bitmap', '$Boot', '$LogFile', '$MFT', '$MFTMirr',
+                  '$Secure', '$UpCase', '$Volume', '$Extend'}
 DEFAULT_SECTOR_SIZE = 512
 MAX_RECURSION_DEPTH = 100  # safety limit against directory cycles / corrupted filesystems
 
@@ -143,10 +146,34 @@ def scan_directory(fs, directory, current_path, visited_inodes=None, depth=0, is
             is_volume_label = (file_name.endswith('(Volume Label Entry)') or 
                              (is_fat_fs and file_info.meta.size == 0 and not is_dir and file_name.isupper()))
             
+            if current_path == '/' and file_name in NTFS_METAFILES:
+                logger.debug(f"Skipped NTFS metadata file: {file_name}")
+                continue
+
             if is_volume_label or file_name in SYSTEM_FILES:
                 logger.debug(f"Skipped system/volume label file: {file_name}")
                 continue
             
+            # Deleted = the directory entry or the inode is no longer allocated
+            name_flags = getattr(entry.info.name, 'flags', 0)
+            meta_flags = getattr(file_info.meta, 'flags', 0)
+            is_deleted = bool(
+                (name_flags & pytsk3.TSK_FS_NAME_FLAG_UNALLOC) or
+                (meta_flags & pytsk3.TSK_FS_META_FLAG_UNALLOC)
+            )
+
+            # Stale directory entries (unallocated name, but the inode now belongs to something
+            # else) and garbage names from directory slack would show up as phantom files
+            # and fake directory cycles, so they are skipped. Real deleted files
+            # (name and inode both unallocated) are kept.
+            if '/' in file_name or (name_flags & pytsk3.TSK_FS_NAME_FLAG_UNALLOC and
+                                    not meta_flags & pytsk3.TSK_FS_META_FLAG_UNALLOC):
+                logger.debug(f"Skipped stale directory entry: {file_name}")
+                continue
+            if is_deleted and is_dir:
+                logger.debug(f"Skipped deleted directory: {file_name}")
+                continue
+
             meta_data = {
                 "name": file_name,
                 "path": full_path,
@@ -156,7 +183,9 @@ def scan_directory(fs, directory, current_path, visited_inodes=None, depth=0, is
                 "m_time": file_info.meta.mtime,
                 "a_time": file_info.meta.atime,
                 "c_time": file_info.meta.ctime,
-                "e_time": file_info.meta.crtime 
+                "e_time": file_info.meta.crtime,
+                "mode": int(getattr(file_info.meta, 'mode', 0) or 0),
+                "deleted": is_deleted
             }
             
             files_data.append(meta_data)

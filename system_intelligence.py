@@ -30,6 +30,13 @@ def detect_os_type(fs):
         except:
             pass
         
+        # NTFS is the Windows filesystem (also covers a volume without a Windows folder)
+        try:
+            if fs.info.ftype in (pytsk3.TSK_FS_TYPE_NTFS, pytsk3.TSK_FS_TYPE_NTFS_DETECT):
+                return 'windows'
+        except Exception:
+            pass
+
         # Check for macOS indicators
         try:
             fs.open("/Applications")
@@ -66,6 +73,13 @@ def detect_os_type(fs):
         except:
             pass
             
+        # A Users folder without any Linux/macOS layout points to a Windows data volume
+        try:
+            fs.open("/Users")
+            return 'windows'
+        except Exception:
+            pass
+
     except Exception as e:
         logger.debug(f"Error detecting OS type: {e}")
     
@@ -364,6 +378,7 @@ def extract_command_history(fs, file_list, os_type, user_profiles):
                 if commands:
                     if user not in history_data:
                         history_data[user] = {
+                            'windows': os_type == 'windows',
                             'files': [],
                             'commands': [],
                             'total_commands': 0
@@ -386,14 +401,19 @@ def extract_command_history(fs, file_list, os_type, user_profiles):
 
 
 def analyze_command_history(history_data):
-    """Analyze command history for interesting patterns.
-    
+    """Analyze command history with the same rules the memory analysis uses.
+
     Args:
         history_data: Command history organized by user
-        
+
     Returns:
-        dict: Analysis results
+        dict: Analysis results. suspicious_commands is grouped by command
+        (each entry lists reasons, severity and the users who ran it).
     """
+    # Imported here so the shared rule set stays in memory_analyzer.py
+    from memory_analyzer import (SUSPICIOUS_COMMAND_RULES, WINDOWS_COMMAND_RULES,
+                                 analyze_shell_command, group_suspicious_commands)
+
     analysis = {
         'total_users_with_history': len(history_data),
         'total_commands': 0,
@@ -402,165 +422,51 @@ def analyze_command_history(history_data):
         'file_operations': [],
         'most_common': []
     }
-    
-    # Patterns for suspicious activities
-    suspicious_patterns = [
-        # Download/Exfiltration
-        r'\b(wget|curl)\s+http',
-        r'\brsync\s+',
-        r'\bscp\s+.*@',
-        r'\bftp\s+',
-        r'\bnc\s+',
-        r'\bnetcat\s+',
-        
-        # Remote Access
-        r'\bssh\s+',
-        r'\btelnet\s+',
-        
-        # Database Access
-        r'\bmysql\s+',
-        r'\bpsql\s+',
-        r'\bsqlite3\s+',
-        
-        # Privilege Escalation
-        r'\bsu\s+',
-        r'\bsudo\s+',
-        r'\bpkexec\s+',
-        r'\bchmod\s+[4567]\d\d\d',
-        r'\bchmod\s+\+s\b',
-        
-        # Encoding/Obfuscation
-        r'\bbase64\s+',
-        r'\bxxd\s+',
-        r'\bopenssl\s+enc',
-        
-        # Dangerous Operations
-        r'\bchmod\s+777',
-        r'\brm\s+-rf\s+/',
-        r'\bdd\s+if=',
-        r'\bmkfs\.',
-        
-        # History Manipulation
-        r'history\s+-c',
-        r'export\s+HISTFILE',
-        r'unset\s+HISTFILE',
-        r'shred\s+.*history',
-        
-        # Credential Access
-        r'cat\s+/etc/shadow',
-        r'cat\s+/etc/passwd',
-        r'grep\s+.*password',
-        r'grep\s+.*passwd',
-        
-        # Persistence
-        r'\bcrontab\s+',
-        r'\bsystemctl\s+(enable|start)',
-        r'\bchkconfig\s+',
-        r'\.bashrc',
-        r'\.bash_profile',
-        
-        # Compilation (potentially malicious)
-        r'\bgcc\s+',
-        r'\bmake\s+',
-        r'python\s+-c\s+',
-        r'perl\s+-e\s+',
-        r'ruby\s+-e\s+',
-        
-        # Windows PowerShell suspicious patterns
-        r'Invoke-WebRequest',
-        r'Invoke-Expression',
-        r'IEX\s+',
-        r'DownloadString',
-        r'DownloadFile',
-        r'-ExecutionPolicy\s+Bypass',
-        r'-EncodedCommand',
-        r'-enc\s+',
-        r'FromBase64String',
-        r'Start-Process.*-Verb\s+RunAs',
-        r'Start-Process.*-WindowStyle\s+Hidden',
-        
-        # Windows Credentials
-        r'net\s+user.*password',
-        r'Get-Credential',
-        r'ConvertTo-SecureString',
-        r'mimikatz',
-        r'sekurlsa',
-        
-        # Windows Registry
-        r'reg\s+add',
-        r'reg\s+delete',
-        r'reg\s+query.*password',
-        r'Get-ItemProperty.*HKLM',
-        r'Set-ItemProperty.*HKLM',
-        
-        # Windows Lateral Movement
-        r'psexec',
-        r'wmic\s+',
-        r'Enter-PSSession',
-        r'Invoke-Command.*-ComputerName',
-        
-        # Windows Discovery
-        r'Get-Process',
-        r'Get-Service',
-        r'Get-NetTCPConnection',
-        r'Get-NetIPAddress',
-        r'whoami\s+/priv',
-    ]
-    
+
     network_patterns = [
         r'\b(ssh|scp|ftp|telnet|nc|netcat)\b',
         r'\b(wget|curl)\b',
         r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'  # IP addresses
     ]
-    
-    file_op_patterns = [
-        r'\b(rm|mv|cp|mkdir|touch|chmod|chown)\b'
-    ]
-    
+    file_op_patterns = [r'\b(rm|mv|cp|mkdir|touch|chmod|chown)\b']
+
     command_freq = {}
-    
+    findings = []
+
     for user, data in history_data.items():
+        rules = WINDOWS_COMMAND_RULES if data.get('windows') else SUSPICIOUS_COMMAND_RULES
         for cmd in data['commands']:
             analysis['total_commands'] += 1
-            
-            # Get first word (command name)
+
             cmd_name = cmd.split()[0] if cmd.split() else cmd
             command_freq[cmd_name] = command_freq.get(cmd_name, 0) + 1
-            
-            # Check for suspicious patterns
-            for pattern in suspicious_patterns:
-                if re.search(pattern, cmd, re.IGNORECASE):
-                    analysis['suspicious_commands'].append({
-                        'user': user,
-                        'command': cmd[:100]  # Truncate long commands
-                    })
-                    break
-            
-            # Check for network commands
-            for pattern in network_patterns:
-                if re.search(pattern, cmd, re.IGNORECASE):
-                    analysis['network_commands'].append({
-                        'user': user,
-                        'command': cmd[:100]
-                    })
-                    break
-            
-            # Check for file operations
-            for pattern in file_op_patterns:
-                if re.search(pattern, cmd, re.IGNORECASE):
-                    analysis['file_operations'].append({
-                        'user': user,
-                        'command': cmd[:100]
-                    })
-                    break
-    
-    # Get most common commands (top 10)
+
+            for finding in analyze_shell_command(cmd, rules):
+                findings.append({
+                    'command': cmd,
+                    'reason': finding['reason'],
+                    'severity': finding['severity'],
+                    'pid': user,       # grouping key: who ran it
+                })
+
+            if any(re.search(p, cmd, re.IGNORECASE) for p in network_patterns):
+                analysis['network_commands'].append({'user': user, 'command': cmd[:100]})
+            if any(re.search(p, cmd, re.IGNORECASE) for p in file_op_patterns):
+                analysis['file_operations'].append({'user': user, 'command': cmd[:100]})
+
+    grouped = group_suspicious_commands(findings)
+    for item in grouped:
+        item['users'] = item.pop('pids')
+        for key in ('processes', 'times', 'sources', 'by_pid'):
+            item.pop(key, None)
+    analysis['suspicious_commands'] = grouped
+
     sorted_commands = sorted(command_freq.items(), key=lambda x: x[1], reverse=True)
     analysis['most_common'] = [
         {'command': cmd, 'count': count}
         for cmd, count in sorted_commands[:10]
     ]
-    
+
     return analysis
 
 

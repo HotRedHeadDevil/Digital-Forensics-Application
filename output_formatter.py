@@ -20,7 +20,9 @@ def _translate_windows_status_code(code):
         '%%2311': 'Account expired',
         '%%2312': 'Account locked out',
         '%%2313': 'Account restriction',
-        '0xC000006D': 'Bad username',
+        '0xC000006D': 'Bad username or password',
+        '0xC000006A': 'Wrong password',
+        '0xC0000064': 'User does not exist',
         '0xC000006E': 'Account restriction',
         '0xC000006F': 'Invalid logon hours',
         '0xC0000070': 'Workstation restriction',
@@ -33,7 +35,12 @@ def _translate_windows_status_code(code):
     }
     
     # Return translated message if found, otherwise return original code
-    return status_codes.get(code, code)
+    text = str(code)
+    if text.startswith('Status:'):
+        text = text[len('Status:'):].strip()
+    normalized = text.upper().replace('0X', '0x', 1) if text.lower().startswith('0x') else text
+    normalized = '0x' + normalized[2:].upper() if normalized.startswith('0x') else normalized
+    return status_codes.get(normalized, code)
 
 
 def format_json(data):
@@ -732,7 +739,6 @@ def format_textlog_table(data):
         output.append("-" * 110)
         output.append(f"Successful Logins: {login.get('successful_logins', 0)}")
         output.append(f"Failed Logins: {login.get('failed_logins', 0)}")
-        output.append(f"SSH Connections: {login.get('ssh_connections', 0)}")
         output.append(f"Sudo Commands: {login.get('sudo_commands', 0)}")
         output.append(f"Unique Users: {login.get('unique_users', 0)}")
         output.append(f"Unique IPs: {login.get('unique_ips', 0)}")
@@ -766,22 +772,40 @@ def format_textlog_table(data):
             output.append("-" * 40)
             output.append("")
         
+        # Show successful logins
+        successful = login.get('details', {}).get('successful_logins')
+        if successful:
+            output.append("SUCCESSFUL LOGINS:")
+            header = f"{'Service':<10} {'User':<20} {'IP Address':<20} {'Method':<20}"
+            output.append(header)
+            output.append("-" * 70)
+            for entry in successful[:15]:
+                output.append(f"{str(entry.get('service', 'ssh')).upper():<10} "
+                              f"{entry.get('user', 'Unknown')[:19]:<20} "
+                              f"{entry.get('ip_address', '-')[:19]:<20} "
+                              f"{entry.get('method', '-')[:19]:<20}")
+            output.append("-" * 70)
+            if len(successful) > 15:
+                output.append(f"... and {len(successful) - 15} more successful logins")
+            output.append("")
+
         # Show recent failed logins
         if login.get('details', {}).get('failed_logins'):
             failed = login['details']['failed_logins']
             if failed:
                 output.append("")
                 output.append("FAILED LOGIN ATTEMPTS:")
-                header = f"{'User':<20} {'IP Address':<20} {'Reason':<20}"
+                header = f"{'Service':<10} {'User':<20} {'IP Address':<20} {'Reason':<20}"
                 output.append(header)
-                output.append("-" * 60)
+                output.append("-" * 70)
                 for attempt in failed[:15]:
+                    service = str(attempt.get('service', 'ssh')).upper()
                     user = attempt.get('user', 'Unknown')[:19]
                     ip = attempt.get('ip_address', '-')[:19]
                     reason = attempt.get('reason', '-')[:19]
-                    row = f"{user:<20} {ip:<20} {reason:<20}"
+                    row = f"{service:<10} {user:<20} {ip:<20} {reason:<20}"
                     output.append(row)
-                output.append("-" * 60)
+                output.append("-" * 70)
                 if len(failed) > 15:
                     output.append(f"\n... and {len(failed) - 15} more failed attempts")
         
@@ -833,6 +857,91 @@ def format_textlog_table(data):
     output.append("=" * 110)
     
     return '\n'.join(output)
+
+
+def _fmt_epoch(value):
+    """Epoch seconds -> 'YYYY-MM-DD HH:MM:SS' (UTC); '-' when missing."""
+    import datetime
+    if not value:
+        return '-'
+    try:
+        return datetime.datetime.fromtimestamp(int(value), datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, OverflowError, OSError):
+        return '-'
+
+
+def _fmt_size(size_bytes):
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
+def _section(title):
+    return ["-" * 110, title, "-" * 110]
+
+
+def _format_disk_command_history(data):
+    sys_data = data.get('system_intelligence') or {}
+    history = sys_data.get('command_history')
+    if not history:
+        return []
+    analysis = sys_data.get('command_analysis', {})
+    suspicious = analysis.get('suspicious_commands', [])
+    out = _section(f"COMMAND HISTORY ANALYSIS")
+    out.append(f"Users with history: {len(history)}   Total commands: {analysis.get('total_commands', 0)}")
+    for user, info in history.items():
+        files = ', '.join(f"{f['filename']} ({f['command_count']})" for f in info['files'])
+        out.append(f"  {user}: {info['total_commands']} commands  [{files}]")
+    out.append("")
+
+    out.append(f"SUSPICIOUS COMMANDS ({len(suspicious)} unique)")
+    if not suspicious:
+        out.append("  No suspicious commands found in the history files.")
+    for item in suspicious:
+        out.append(f"  [{item['severity'].upper()}] {item['command']}")
+        out.append(f"      Reason: {item['reason']}")
+        out.append(f"      Users : {', '.join(str(u) for u in item['users'])}   Occurrences: {item['records']}")
+    out.append("")
+
+    return out
+
+
+MAX_YARA_PATHS = 10  # paths listed per rule in the table
+
+
+def _format_disk_yara(data):
+    yara = data.get('yara_detection')
+    if not yara:
+        return []
+    out = _section("YARA SCAN")
+    out.append(f"Files scanned: {yara.get('total_files_scanned', 0)}   "
+               f"Files with matches: {yara.get('files_with_matches', 0)}")
+    if yara.get('files_skipped_system_folders'):
+        out.append(f"Not scanned (outside user-data folders such as /home, /tmp, /var/www, Users): {yara['files_skipped_system_folders']} files")
+    out.append("")
+    # Group by rule (finding type): one block per rule with the files it matched
+    by_rule = {}
+    for det in yara.get('detections', []):
+        for rule in det['rules']:
+            entry = by_rule.setdefault(rule['rule'], {'rule': rule, 'files': []})
+            entry['files'].append(det['file'])
+    if not by_rule:
+        out.append("  No matches.")
+        out.append("")
+    order = {'critical': 3, 'high': 2, 'medium': 1, 'low': 0}
+    for name, entry in sorted(by_rule.items(),
+                              key=lambda kv: (-order.get(kv[1]['rule']['severity'], 0), kv[0])):
+        rule = entry['rule']
+        out.append(f"[{rule['severity'].upper()}] {name} - {rule['description']} ({len(entry['files'])} file(s))")
+        shown = sorted(entry['files'])[:MAX_YARA_PATHS]
+        for path in shown:
+            out.append(f"    {path}")
+        if len(entry['files']) > len(shown):
+            out.append(f"    ... and {len(entry['files']) - len(shown)} more files (use --output json for the full list)")
+        out.append("")
+    return out
 
 
 def format_table(data):
@@ -898,103 +1007,9 @@ def format_table(data):
         
         output.append("")
     
-    # Print command history if available
-    if 'system_intelligence' in data and data['system_intelligence'].get('command_history'):
-        cmd_history = data['system_intelligence']['command_history']
-        cmd_analysis = data['system_intelligence'].get('command_analysis', {})
-        
-        output.append("-" * 110)
-        output.append("COMMAND HISTORY ANALYSIS")
-        output.append("-" * 110)
-        
-        output.append(f"Users with History: {len(cmd_history)}")
-        output.append(f"Total Commands: {cmd_analysis.get('total_commands', 0)}")
-        output.append("")
-        
-        # Show per-user summary
-        for user, data_user in cmd_history.items():
-            output.append(f"{user}:")
-            output.append(f"  Total commands: {data_user['total_commands']}")
-            output.append(f"  History files: {len(data_user['files'])}")
-            for hist_file in data_user['files']:
-                output.append(f"    - {hist_file['filename']}: {hist_file['command_count']} commands")
-        
-        output.append("")
-        
-        # Show interesting findings
-        if cmd_analysis.get('suspicious_commands'):
-            output.append("Suspicious Commands Detected:")
-            for item in cmd_analysis['suspicious_commands'][:5]:  # Show top 5
-                output.append(f"  [{item['user']}] {item['command']}")
-            if len(cmd_analysis['suspicious_commands']) > 5:
-                output.append(f"  ... and {len(cmd_analysis['suspicious_commands']) - 5} more")
-            output.append("")
-        
-        if cmd_analysis.get('most_common'):
-            output.append("Most Common Commands:")
-            for item in cmd_analysis['most_common'][:5]:  # Show top 5
-                output.append(f"  {item['command']}: {item['count']} times")
-            output.append("")
-        
-        output.append("")
-    
-    # Print YARA detection summary if available
-    if 'yara_detection' in data:
-        yara = data['yara_detection']
-        output.append("-" * 110)
-        output.append("YARA DETECTION SUMMARY")
-        output.append("-" * 110)
-        output.append(f"Files Scanned: {yara.get('total_files_scanned', 0)}")
-        output.append(f"Files with Matches: {yara.get('files_with_matches', 0)}")
-        output.append(f"Total Detections: {yara.get('total_detections', 0)}")
-        output.append("")
-        
-        if yara.get('detections'):
-            output.append("Detections:")
-            for detection in yara['detections']:
-                output.append(f"  • {detection['file']}")
-                output.append(f"    Rule: {detection['rule']}")
-                output.append(f"    Size: {detection['size']} bytes")
-        output.append("")
-    
-    # Print results table
-    if 'results' in data and data['results']:
-        output.append("-" * 110)
-        output.append("FILES AND DIRECTORIES")
-        output.append("-" * 110)
-        
-        header = f"{'Type':<8} {'Name':<40} {'Size':<12} {'YARA Matches':<35}"
-        output.append(header)
-        output.append("-" * 110)
-        
-        for item in data['results']:
-            item_type = item.get('type', 'N/A')
-            name = item.get('name', 'N/A')
-            
-            if len(name) > 39:
-                name = name[:36] + '...'
-            
-            if item.get('type') == 'file':
-                size_bytes = item.get('size', 0)
-                if size_bytes < 1024:
-                    size = f"{size_bytes} B"
-                elif size_bytes < 1024*1024:
-                    size = f"{size_bytes/1024:.1f} KB"
-                else:
-                    size = f"{size_bytes/(1024*1024):.2f} MB"
-            else:
-                size = '-'
-            
-            if 'yara_matches' in item and item['yara_matches']:
-                yara = ', '.join(item['yara_matches'])
-                if len(yara) > 34:
-                    yara = yara[:31] + '...'
-            else:
-                yara = '-'
-            
-            row = f"{item_type:<8} {name:<40} {size:<12} {yara:<35}"
-            output.append(row)
-    
+    output.extend(_format_disk_command_history(data))
+    output.extend(_format_disk_yara(data))
+
     output.append("=" * 110)
     
     return '\n'.join(output)

@@ -28,7 +28,7 @@ SUSPICIOUS_COMMAND_RULES = (
         "critical",
     ),
     (
-        re.compile(r"\bchmod\s+(?:[4567]\d{2,3}|\+s)\b", re.IGNORECASE),
+        re.compile(r"\bchmod\s+(?:-R\s+)?(?:[2467][0-7]{3}\b|[ugoa]*\+s\b)", re.IGNORECASE),
         "Permission change that enables privilege escalation (setuid/setgid)",
         "high",
     ),
@@ -43,7 +43,7 @@ SUSPICIOUS_COMMAND_RULES = (
         "high",
     ),
     (
-        re.compile(r"\b(?:crontab\s+-[ei]|systemctl\s+(?:enable|start)|(?:>>|>)\s*[^\n]*(?:\.bashrc|\.profile|\.bash_profile))", re.IGNORECASE),
+        re.compile(r"\b(?:crontab\s+-[ei]|systemctl\s+(?:enable|start))|>>?\s*\S*(?:\.bashrc|\.profile|\.bash_profile|\.zshrc|/var/spool/cron|/etc/cron)", re.IGNORECASE),
         "Possible persistence via cron, systemd or login scripts",
         "medium",
     ),
@@ -56,6 +56,71 @@ SUSPICIOUS_COMMAND_RULES = (
         re.compile(r"\b(?:curl|wget)\b[^\n]*(?:/tmp|/var/tmp|/dev/shm)\b", re.IGNORECASE),
         "File downloaded into a temporary or shared directory",
         "medium",
+    ),
+    (
+        re.compile(r"/dev/tcp/|\bbash\s+-i\b|\bsocat\b[^\n]*\bexec:", re.IGNORECASE),
+        "Possible reverse shell",
+        "high",
+    ),
+    (
+        re.compile(r"\bbase64\s+(?:-d|--decode)\b[^\n]*\|\s*(?:ba)?sh\b", re.IGNORECASE),
+        "Decoded content piped into a shell",
+        "high",
+    ),
+    (
+        re.compile(r"\b(?:cat|less|more|grep)\b[^\n]*(?:/etc/passwd|\bpassword\b|credentials)", re.IGNORECASE),
+        "Search or read of credentials",
+        "medium",
+    ),
+    (
+        re.compile(r"\b(?:curl|wget)\b[^\n]*\s(?:-d|--data\S*|-F|-T|--upload-file|--post-file)\s+@", re.IGNORECASE),
+        "File sent to a remote server",
+        "high",
+    ),
+    (
+        re.compile(r"\b(?:curl|wget)\b[^\n]*\.(?:sh|py|pl|elf|bin|exe|ps1)\b", re.IGNORECASE),
+        "Script or program downloaded from the internet",
+        "medium",
+    ),
+    (
+        re.compile(r"\b(?:nc|ncat|netcat)\s+(?:-\w*l\w*)", re.IGNORECASE),
+        "Network listener opened with netcat",
+        "high",
+    ),
+    (
+        re.compile(r"\b(?:base64|xxd|openssl\s+enc)\b[^\n]*(?:/etc/shadow|/etc/passwd|id_rsa)", re.IGNORECASE),
+        "Sensitive file encoded or encrypted",
+        "high",
+    ),
+    (
+        re.compile(r"\brm\s+(?:-[a-z]*\s+)*-[a-z]*[rf][a-z]*\s+(?:-[a-z]+\s+)*/(?:var/log|etc|boot|usr|bin|home|root)\b", re.IGNORECASE),
+        "Recursive deletion of system, home or log directories",
+        "high",
+    ),
+    (
+        re.compile(r"\bdd\s+if=/dev/(?:sd|nvme|vd|hd)\w*|\bmkfs(?:\.\w+)?\s+/dev/", re.IGNORECASE),
+        "Raw disk copy or filesystem creation on a device",
+        "medium",
+    ),
+    (
+        re.compile(r"\bpkexec\b", re.IGNORECASE),
+        "Privilege escalation via pkexec",
+        "medium",
+    ),
+    (
+        re.compile(r"\balias\b[^\n]*--hide", re.IGNORECASE),
+        "Alias that hides files from listings",
+        "medium",
+    ),
+    (
+        re.compile(r"\bopenssl\s+enc\b|\bdocker\s+run\b[^\n]*--privileged", re.IGNORECASE),
+        "File encryption or privileged container started",
+        "medium",
+    ),
+    (
+        re.compile(r"\bchmod\s+(?:-R\s+)?0?777\b", re.IGNORECASE),
+        "World-writable permissions set",
+        "low",
     ),
 )
 
@@ -142,6 +207,46 @@ WINDOWS_COMMAND_RULES = (
         re.compile(r"\bicacls\b.*\s/grant\s+everyone:f\b.*\s/t\b", re.IGNORECASE),
         "Full access granted to everyone recursively (icacls Everyone:F)",
         "high",
+    ),
+    (
+        re.compile(r"Start-Process\b[^\n]*(?:-Verb\s+RunAs|-WindowStyle\s+Hidden)", re.IGNORECASE),
+        "Program started elevated or with a hidden window",
+        "medium",
+    ),
+    (
+        re.compile(r"\b(?:curl|iwr|invoke-webrequest|invoke-restmethod|irm)\b[^\n]*-(?:Method\s+(?:POST|PUT)|Body\b)", re.IGNORECASE),
+        "Data sent to a remote server",
+        "high",
+    ),
+    (
+        re.compile(r"\breg(?:\.exe)?\s+query\b[^\n]*password|Select-String\b[^\n]*password|\b(?:type|cat|more)\b[^\n]*password", re.IGNORECASE),
+        "Search or read of credentials",
+        "medium",
+    ),
+    (
+        re.compile(r"\bGet-Credential\b|ConvertTo-SecureString\b[^\n]*-AsPlainText", re.IGNORECASE),
+        "Credential handling in plain text",
+        "medium",
+    ),
+    (
+        re.compile(r"\breg(?:\.exe)?\s+delete\b[^\n]*\\run\b|Set-ItemProperty\b[^\n]*(?:HKLM|CurrentControlSet\\Services)", re.IGNORECASE),
+        "Registry persistence or service configuration changed",
+        "medium",
+    ),
+    (
+        re.compile(r"\bdocker\s+run\b[^\n]*--privileged", re.IGNORECASE),
+        "Privileged container started",
+        "medium",
+    ),
+    (
+        re.compile(r"-ExecutionPolicy\s+Bypass|\bFromBase64String\b", re.IGNORECASE),
+        "PowerShell policy bypass or Base64 decoding",
+        "medium",
+    ),
+    (
+        re.compile(r"\bpsexec(?:\.exe)?\b|\bEnter-PSSession\b|\bInvoke-Command\b[^\n]*-ComputerName", re.IGNORECASE),
+        "Remote execution on another machine",
+        "medium",
     ),
     (
         USER_WRITABLE_PATH_RE,

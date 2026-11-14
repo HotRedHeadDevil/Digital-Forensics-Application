@@ -183,6 +183,8 @@ def disk(filepath, yara_rules, quick, output):
     
     analysis_data = analyze_disk_image(filepath, quick_mode=quick, yara_rules_path=yara_rules)
     
+    analysis_status = analysis_data.pop('analysis_status', None)
+
     if "error" in analysis_data:
         summary = {
             "analysis_type": "disk_image",
@@ -191,6 +193,8 @@ def disk(filepath, yara_rules, quick, output):
             "files_scanned": 0,
             "directories_scanned": 0,
             "status": "error",
+            "error": analysis_data["error"],
+            "analysis_status": analysis_status,
             "results": [analysis_data]
         }
     else:
@@ -213,16 +217,16 @@ def disk(filepath, yara_rules, quick, output):
             "total_size": size_display,
             "files_scanned": total_files,
             "directories_scanned": total_dirs,
-            "status": "completed"
+            # "completed" only when every part of the analysis covered all it should;
+            # otherwise the details are in analysis_status
+            "status": ("completed" if not analysis_status or analysis_status['overall'] == 'complete'
+                       else "completed_with_warnings"),
+            "analysis_status": analysis_status
         }
         
         # Add system intelligence if available
         if 'system_intelligence' in analysis_data:
             summary['system_intelligence'] = analysis_data['system_intelligence']
-        
-        # Add log intelligence if available (logins, network connections, user/IP frequency)
-        if 'log_intelligence' in analysis_data:
-            summary['log_intelligence'] = analysis_data['log_intelligence']
         
         # Add YARA detection summary at the top if available
         if 'yara_detection' in analysis_data:
@@ -230,8 +234,30 @@ def disk(filepath, yara_rules, quick, output):
         
         # Add detailed results at the end
         summary['results'] = file_list
-    
+
     print_output(summary, format_type=output)
+
+    # CSV lists only files, so problems of the analysis go to stderr (stdout stays valid CSV)
+    if output.lower() == 'csv':
+        _print_incomplete_warnings(analysis_status, analysis_data.get('error'))
+
+
+def _print_incomplete_warnings(analysis_status, error=None):
+    """Write a short list of failed or incomplete analysis parts to stderr."""
+    if error:
+        click.echo(f"ERROR: {error}", err=True)
+    if not analysis_status or analysis_status.get('overall') == 'complete':
+        return
+    click.echo("WARNING: the analysis is incomplete:", err=True)
+    for stage in analysis_status['stages']:
+        if stage['status'] in ('partial', 'failed', 'not_run'):
+            click.echo(f"  [{stage['status'].upper()}] {stage['name']}", err=True)
+            if stage.get('reason'):
+                click.echo(f"      - {stage['reason']}", err=True)
+            for problem in stage['problems']:
+                click.echo(f"      - {problem['message']}", err=True)
+    click.echo("Use --output json or --output table for the details.", err=True)
+
 
 @cli.command()
 @click.argument('filepath', type=click.Path(exists=True))

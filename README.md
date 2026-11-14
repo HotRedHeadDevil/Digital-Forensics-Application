@@ -74,6 +74,25 @@ uv run python main.py disk image.dd --output csv
 uv run python main.py disk image.dd --output table
 ```
 
+#### Is the analysis complete?
+
+Every part of the disk analysis (filesystem scan, system intelligence, command history,
+YARA scan) reports whether it ran completely. The result contains
+`analysis_status`, and the table output starts with an **ANALYSIS COMPLETENESS** section.
+An empty list of findings is only meaningful when the part that produces it is `[OK]`.
+
+| Status      | Meaning                                                                         |
+| ----------- | ------------------------------------------------------------------------------- |
+| `[OK]`      | The part ran and covered everything it is designed to cover                     |
+| `[PARTIAL]` | It ran, but some input was skipped, cut at a size limit or unreadable           |
+| `[FAILED]`  | It hit an error (e.g. YARA rules do not compile) and produced no usable result  |
+| `[NOT RUN]` | It could not start (e.g. the filesystem could not be opened, OS not recognised) |
+| `[SKIPPED]` | Left out on purpose (`--quick`); does not make the analysis incomplete          |
+
+The top-level `status` is `completed` only when nothing is partial, failed or not run;
+otherwise it is `completed_with_warnings` (or `error` when the filesystem cannot be read).
+With `--output csv` the problems are written to stderr so that stdout stays valid CSV.
+
 ### Memory Analysis
 
 Memory analysis uses Volatility 3 and currently targets selected Windows and
@@ -179,6 +198,7 @@ ForensicAutoCLI
 ├── system_intelligence.py  # OS detection, user profiles, command history
 ├── log_analyzer.py         # Log file analysis (auth.log, syslog)
 ├── yara_scanner.py         # YARA scanning engine
+├── analysis_status.py      # Tracks which parts of an analysis failed or were incomplete
 ├── output_formatter.py     # Output formatting (JSON, CSV, table)
 ├── validators.py           # Input validation
 ├── rules/

@@ -3,6 +3,7 @@
 import pytsk3
 import os
 import logging
+from analysis_status import report_start, report_partial, report_failed
 
 logger = logging.getLogger(__name__)
 
@@ -36,18 +37,31 @@ def _is_fat_like_filesystem(fs):
         return False
 
 
-def open_filesystem(img):
+def _partition_label(part):
+    """Short description of a partition for reports, e.g. 'Linux (0x83), start sector 2048'."""
+    desc = part.desc
+    if isinstance(desc, bytes):
+        desc = desc.decode('utf-8', 'ignore')
+    return f"{str(desc).strip() or 'unnamed'}, start sector {part.start}"
+
+
+def open_filesystem(img, status=None):
     """Detects partition offset and opens filesystem.
-    
+
     Args:
         img: PyTSK3 Img_Info object
-        
+        status: Optional AnalysisStatus; receives a report when only part of the
+            disk can be analysed (more than one partition, unreadable partition)
+
     Returns:
         tuple: (pytsk3.FS_Info, offset) or (None, None) on error
     """
     global _partition_warning_shown
-    
+
     offset = 0
+    found_partition = False
+    unreadable_partitions = []
+    unanalysed_partitions = []
     VS_CLASSES = [
         getattr(pytsk3, 'VS_Info', None),
         getattr(pytsk3, 'Volume_Info', None)
@@ -64,16 +78,22 @@ def open_filesystem(img):
 
             for part in vol:
                 if part.flags & pytsk3.TSK_VS_PART_FLAG_ALLOC and part.start > 0:
-                    offset = part.start * sector_size 
-                    
+                    if found_partition:
+                        # Only the first readable filesystem is analysed
+                        unanalysed_partitions.append(_partition_label(part))
+                        continue
+
+                    offset = part.start * sector_size
+
                     try:
                         pytsk3.FS_Info(img, offset=offset)
                         logger.info(f"Found valid filesystem at offset: 0x{offset:X}")
-                        break
+                        found_partition = True
                     except Exception:
-                        offset = 0 
+                        unreadable_partitions.append(_partition_label(part))
+                        offset = 0
                         continue
-        
+
         except Exception as e:
             # Only show warning once per run
             if not _partition_warning_shown:
@@ -86,13 +106,28 @@ def open_filesystem(img):
 
     try:
         fs = pytsk3.FS_Info(img, offset=offset)
-        return fs, offset
     except Exception as e:
         logger.error(f"Cannot open filesystem: {e}")
+        report_failed(status, 'filesystem_scan', f"Cannot open filesystem: {e}")
+        for label in unreadable_partitions:
+            report_failed(status, 'filesystem_scan',
+                          "Partition without a readable filesystem (encrypted, unsupported or damaged?)",
+                          example=label)
         return None, None
 
+    if unreadable_partitions:
+        report_partial(status, 'filesystem_scan',
+                       "Partition without a readable filesystem was skipped (encrypted, swap, "
+                       "unsupported or damaged); its content was not analysed",
+                       example=unreadable_partitions[0], count=len(unreadable_partitions))
+    if unanalysed_partitions:
+        report_partial(status, 'filesystem_scan',
+                       "Disk has more partitions; only the first readable filesystem was analysed",
+                       example=unanalysed_partitions[0], count=len(unanalysed_partitions))
+    return fs, offset
 
-def scan_directory(fs, directory, current_path, visited_inodes=None, depth=0, is_fat_fs=None):
+
+def scan_directory(fs, directory, current_path, visited_inodes=None, depth=0, is_fat_fs=None, status=None):
     """Recursively scans directory and collects file metadata.
     
     Args:
@@ -103,7 +138,9 @@ def scan_directory(fs, directory, current_path, visited_inodes=None, depth=0, is
             this run
         depth: Current recursion depth, used to enforce MAX_RECURSION_DEPTH
         is_fat_fs: Whether fs is a FAT/exFAT filesystem
-        
+        status: Optional AnalysisStatus; receives a report for every kind of
+            entry or directory that could not be read (so the file list is incomplete)
+
     Returns:
         list: List of dictionaries with file metadata
     """
@@ -115,6 +152,10 @@ def scan_directory(fs, directory, current_path, visited_inodes=None, depth=0, is
 
     if depth > MAX_RECURSION_DEPTH:
         logger.warning(f"Max recursion depth ({MAX_RECURSION_DEPTH}) reached at '{current_path}', stopping recursion here (possible directory cycle or corrupted filesystem).")
+        report_partial(status, 'filesystem_scan',
+                       f"Directory nesting deeper than {MAX_RECURSION_DEPTH} levels was not traversed "
+                       "(possible directory cycle or damaged filesystem)",
+                       example=current_path)
         return []
 
     files_data = []
@@ -196,52 +237,68 @@ def scan_directory(fs, directory, current_path, visited_inodes=None, depth=0, is
             if is_dir:
                 if file_info.meta.addr in visited_inodes:
                     logger.warning(f"Directory cycle detected: '{full_path}' (inode {file_info.meta.addr}) was already scanned, skipping to avoid infinite recursion.")
+                    report_partial(status, 'filesystem_scan',
+                                   "Directory seen twice (cycle or hard-linked directory) was not scanned again",
+                                   example=full_path)
                     continue
 
                 visited_inodes.add(file_info.meta.addr)
                 try:
                     sub_directory = fs.open_dir(inode=file_info.meta.addr)
-                    files_data.extend(scan_directory(fs, sub_directory, full_path, visited_inodes, depth + 1, is_fat_fs))
+                    files_data.extend(scan_directory(fs, sub_directory, full_path, visited_inodes, depth + 1, is_fat_fs, status))
                 except Exception as e:
                     logger.warning(f"Error recursing into directory {file_name}: {e}")
-                    continue 
-                
-        except Exception as e: 
+                    report_partial(status, 'filesystem_scan',
+                                   "Directory could not be read; its content is missing from the file list",
+                                   example=f"{full_path} ({e})")
+                    continue
+
+        except Exception as e:
             logger.debug(f"Unexpected error processing {file_name}: {e}")
+            report_partial(status, 'filesystem_scan',
+                           "Directory entry could not be processed and was left out of the file list",
+                           example=f"{os.path.join(current_path, file_name)} ({e})")
             continue
             
     return files_data
 
 
-def extract_file_metadata(image_path, quick_mode=False, limit=None):
+def extract_file_metadata(image_path, quick_mode=False, limit=None, status=None):
     """Extracts metadata of all files from disk image.
-    
+
     Args:
         image_path: Path to disk image
         quick_mode: Kept for API compatibility; does not limit results
         limit: Maximum number of files to return (None = no limit)
-        
+        status: Optional AnalysisStatus that collects problems found while scanning
+
     Returns:
         dict: Results dictionary or error
     """
+    report_start(status, 'filesystem_scan')
+
     try:
         img = pytsk3.Img_Info(image_path)
     except Exception as e:
+        report_failed(status, 'filesystem_scan', f"Cannot open image: {e}")
         return {"error": f"Cannot open image: {e}"}
 
-    fs, offset = open_filesystem(img)
+    fs, offset = open_filesystem(img, status)
     if fs is None:
         return {"error": "Cannot open filesystem"}
 
     try:
         root_dir = fs.open_dir(path="/")
-        results = scan_directory(fs, root_dir, "/")
-        
+        results = scan_directory(fs, root_dir, "/", status=status)
+
         if limit and len(results) > limit:
             logger.info(f"Limiting results to first {limit} of {len(results)} items.")
+            report_partial(status, 'filesystem_scan',
+                           f"File list was cut to the first {limit} of {len(results)} items")
             results = results[:limit]
-            
+
     except Exception as e:
+        report_failed(status, 'filesystem_scan', f"Error scanning files: {e}")
         return {"error": f"Error scanning files: {e}"}
     
     files_scanned = sum(1 for r in results if r['type'] == 'file')

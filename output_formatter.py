@@ -971,6 +971,41 @@ def _format_disk_command_history(data):
     return out
 
 
+_STAGE_STATUS_LABELS = {
+    'ok': '[OK]',
+    'partial': '[PARTIAL]',
+    'failed': '[FAILED]',
+    'not_run': '[NOT RUN]',
+    'skipped': '[SKIPPED]',
+}
+
+
+def _format_analysis_status(data):
+    """Section that tells which parts of the disk analysis are complete, partial or failed.
+
+    Printed before the findings on purpose: an empty finding list is only meaningful
+    when the part of the analysis that produces it ran completely.
+    """
+    info = data.get('analysis_status')
+    if not info:
+        return []
+    overall = info.get('overall', 'complete')
+    title = "ANALYSIS COMPLETENESS: " + ("COMPLETE" if overall == 'complete' else "INCOMPLETE - read the problems below")
+    out = _section(title)
+    for stage in info.get('stages', []):
+        label = _STAGE_STATUS_LABELS.get(stage['status'], f"[{stage['status'].upper()}]")
+        out.append(f"  {label:<10} {stage['name']}")
+        if stage.get('reason'):
+            out.append(f"             - {stage['reason']}")
+        for problem in stage.get('problems', []):
+            count = f" ({problem['count']}x)" if problem.get('count', 1) > 1 else ""
+            out.append(f"             - {problem['message']}{count}")
+            if problem.get('examples'):
+                out.append(f"                 e.g. {'; '.join(problem['examples'])}")
+    out.append("")
+    return out
+
+
 MAX_YARA_PATHS = 10  # paths listed per rule in the table
 
 
@@ -1040,7 +1075,12 @@ def format_table(data):
     output.append(f"Total Size: {data.get('total_size', '0 bytes')}")
     output.append(f"Files: {data.get('files_scanned', 0)}")
     output.append(f"Directories: {data.get('directories_scanned', 0)}")
+    if data.get('status') == 'error':
+        error = data.get('error') or next((r.get('error') for r in data.get('results', []) if isinstance(r, dict)), None)
+        output.append(f"Error: {error or 'Unknown error'}")
     output.append("")
+
+    output.extend(_format_analysis_status(data))
     
     # Print system intelligence if available
     if 'system_intelligence' in data:

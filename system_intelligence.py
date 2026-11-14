@@ -3,8 +3,15 @@
 import pytsk3
 import logging
 import re
+from analysis_status import report_start, report_partial, report_failed, report_not_run
 
 logger = logging.getLogger(__name__)
+
+MAX_HISTORY_READ = 1024 * 1024  # history files are read up to this size
+
+# The root account has its home outside /home (it is not found as a user profile),
+# but its shell history is one of the most interesting ones. Its files are read as user "root".
+ROOT_HOME_PREFIX = {'linux': '/root/', 'macos': '/var/root/'}
 
 
 def detect_os_type(fs):
@@ -309,41 +316,47 @@ def extract_os_version_macos(fs):
     return os_info
 
 
-def extract_command_history(fs, file_list, os_type, user_profiles):
+def extract_command_history(fs, file_list, os_type, user_profiles, status=None):
     """Extract command history from shell history files.
-    
+
     Args:
         fs: PyTSK3 FS_Info object
         file_list: List of file metadata dictionaries
         os_type: Detected OS type
         user_profiles: List of user profile names
-        
+        status: Optional AnalysisStatus; receives a report for every history file
+            that was skipped, cut or unreadable
+
     Returns:
         dict: Command history organized by user
     """
     history_data = {}
-    
+    report_start(status, 'command_history')
+
     # Define history file patterns based on OS
     if os_type == 'linux' or os_type == 'macos':
         history_files = ['.bash_history', '.zsh_history', '.history', '.sh_history']
+        home_root = '/Users' if os_type == 'macos' else '/home'
     elif os_type == 'windows':
         # PowerShell history location
         history_files = ['ConsoleHost_history.txt']
+        home_root = '/Users'
     else:
+        report_not_run(status, 'command_history', f"Operating system not recognised ({os_type})")
         return history_data
-    
+
     # Search for history files in user directories
     for item in file_list:
         if item['type'] != 'file':
             continue
-        
+
         filename = item['name']
         path = item['path']
-        
+
         # Check if this is a history file
         if filename not in history_files:
             continue
-        
+
         # Determine which user this belongs to
         user = None
         for username in user_profiles:
@@ -352,19 +365,30 @@ def extract_command_history(fs, file_list, os_type, user_profiles):
                     user = username
                     break
             else:
-                if f'/home/{username}/' in path:
+                if f'{home_root}/{username}/' in path:
                     user = username
                     break
-        
+
+        if not user and os_type in ROOT_HOME_PREFIX and path.startswith(ROOT_HOME_PREFIX[os_type]):
+            user = 'root'
+
         if not user:
+            report_partial(status, 'command_history',
+                           "History file outside the known user profiles was not analysed",
+                           example=path)
             continue
-        
+
         # Read and parse the history file
         try:
             file_obj = fs.open(path)
             if file_obj and file_obj.info.meta.size > 0:
                 # Read up to 1MB of history
-                size_to_read = min(file_obj.info.meta.size, 1024 * 1024)
+                size_to_read = min(file_obj.info.meta.size, MAX_HISTORY_READ)
+                if file_obj.info.meta.size > MAX_HISTORY_READ:
+                    report_partial(status, 'command_history',
+                                   "History file larger than 1 MB: only the first 1 MB was analysed "
+                                   "(the newest commands are at the end of the file)",
+                                   example=path)
                 content = file_obj.read_random(0, size_to_read)
                 text = content.decode('utf-8', errors='ignore')
                 
@@ -396,7 +420,10 @@ def extract_command_history(fs, file_list, os_type, user_profiles):
                     
         except Exception as e:
             logger.debug(f"Could not read history file {path}: {e}")
-    
+            report_partial(status, 'command_history',
+                           "History file could not be read",
+                           example=f"{path} ({e})")
+
     return history_data
 
 
@@ -470,18 +497,35 @@ def analyze_command_history(history_data):
     return analysis
 
 
-def extract_system_intelligence(fs, file_list):
+def _run_step(status, stage, description, func, default, *args):
+    """Run one extraction step; a failure is reported and replaced by `default`.
+
+    One failing step (for example an unreadable /etc/os-release) must not discard
+    what the other steps found, and it must not stay hidden in the log only.
+    """
+    try:
+        return func(*args)
+    except Exception as e:
+        logger.warning(f"{description} failed: {e}")
+        report_failed(status, stage, f"{description} failed", example=f"{type(e).__name__}: {e}")
+        return default
+
+
+def extract_system_intelligence(fs, file_list, status=None):
     """Extract system information and user profiles from filesystem.
-    
+
     Args:
         fs: PyTSK3 FS_Info object
         file_list: List of file metadata dictionaries
-        
+        status: Optional AnalysisStatus; receives a report for every item that
+            could not be determined, so that missing data is visible in the output
+
     Returns:
         dict: System intelligence data
     """
     logger.info("Extracting system intelligence...")
-    
+    report_start(status, 'system_intelligence')
+
     intelligence = {
         'os_type': None,
         'hostname': None,
@@ -490,37 +534,66 @@ def extract_system_intelligence(fs, file_list):
         'command_history': {},
         'command_analysis': {}
     }
-    
+
     # Detect OS type
     os_type = detect_os_type(fs)
     intelligence['os_type'] = os_type
     logger.info(f"Detected OS type: {os_type}")
-    
+
     # Extract OS-specific information
-    if os_type == 'linux':
-        intelligence['hostname'] = extract_hostname_linux(fs)
-        intelligence['os_info'] = extract_os_version_linux(fs)
-        intelligence['user_profiles'] = enumerate_user_profiles_linux(fs, file_list)
-        
+    if os_type == 'unknown':
+        report_partial(status, 'system_intelligence',
+                       "Operating system was not recognised: OS details, user profiles and "
+                       "command history could not be extracted")
+    elif os_type == 'linux':
+        intelligence['hostname'] = _run_step(status, 'system_intelligence', "Reading the hostname",
+                                             extract_hostname_linux, None, fs)
+        intelligence['os_info'] = _run_step(status, 'system_intelligence', "Reading the OS version",
+                                            extract_os_version_linux, {}, fs)
+        intelligence['user_profiles'] = _run_step(status, 'system_intelligence', "Listing user profiles",
+                                                  enumerate_user_profiles_linux, [], fs, file_list)
+
     elif os_type == 'windows':
-        intelligence['hostname'] = extract_hostname_windows(fs)
-        intelligence['user_profiles'] = enumerate_user_profiles_windows(fs, file_list)
-    
+        intelligence['hostname'] = _run_step(status, 'system_intelligence', "Reading the hostname",
+                                             extract_hostname_windows, None, fs)
+        intelligence['user_profiles'] = _run_step(status, 'system_intelligence', "Listing user profiles",
+                                                  enumerate_user_profiles_windows, [], fs, file_list)
     elif os_type == 'macos':
-        intelligence['hostname'] = extract_hostname_linux(fs)  # macOS also uses /etc/hostname
-        intelligence['os_info'] = extract_os_version_macos(fs)
-        intelligence['user_profiles'] = enumerate_user_profiles_macos(fs, file_list)
-    
-    # Extract command history if users were found
-    if intelligence['user_profiles']:
+        intelligence['hostname'] = _run_step(status, 'system_intelligence', "Reading the hostname",
+                                             extract_hostname_linux, None, fs)  # macOS also uses /etc/hostname
+        intelligence['os_info'] = _run_step(status, 'system_intelligence', "Reading the OS version",
+                                            extract_os_version_macos, {}, fs)
+        intelligence['user_profiles'] = _run_step(status, 'system_intelligence', "Listing user profiles",
+                                                  enumerate_user_profiles_macos, [], fs, file_list)
+
+    # Items that the code looked for but did not find (only reported for recognised systems)
+    if os_type in ('linux', 'macos'):
+        if not intelligence['hostname']:
+            report_partial(status, 'system_intelligence', "Hostname not found (/etc/hostname missing or empty)")
+        if not intelligence['os_info']:
+            report_partial(status, 'system_intelligence',
+                           "OS name and version not found (/etc/os-release, /etc/lsb-release or SystemVersion.plist)")
+    if os_type != 'unknown' and not intelligence['user_profiles']:
+        report_partial(status, 'system_intelligence', "No user profiles found")
+
+    # Extract command history if users were found (on Linux/macOS also when only root exists)
+    if intelligence['user_profiles'] or os_type in ROOT_HOME_PREFIX:
         logger.info("Extracting command history...")
-        history_data = extract_command_history(fs, file_list, os_type, intelligence['user_profiles'])
+        history_data = _run_step(status, 'command_history', "Reading command history",
+                                 extract_command_history, {}, fs, file_list, os_type,
+                                 intelligence['user_profiles'], status)
         intelligence['command_history'] = history_data
-        
+
         if history_data:
-            intelligence['command_analysis'] = analyze_command_history(history_data)
+            intelligence['command_analysis'] = _run_step(
+                status, 'command_history', "Analysing command history for suspicious commands",
+                analyze_command_history, {}, history_data)
             logger.info(f"Found command history for {len(history_data)} users")
-    
+    else:
+        reason = ("Operating system not recognised" if os_type == 'unknown'
+                  else "No user profiles found, so no history files were searched")
+        report_not_run(status, 'command_history', reason)
+
     # Log summary
     logger.info(f"System intelligence summary: OS={os_type}, Users={len(intelligence['user_profiles'])}")
     

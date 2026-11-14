@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shlex
 import sys
 import json
 import re
@@ -381,6 +382,152 @@ def group_suspicious_commands(findings):
     return result
 
 
+# --------------------------------------------------------------------------
+# Plugin bookkeeping: distinguishes "analysis failed" from "nothing found"
+# --------------------------------------------------------------------------
+
+STATUS_COMPLETED = 'completed'   # every plugin ran; zero findings really means zero findings
+STATUS_PARTIAL = 'partial'       # some plugins failed; empty sections may mean "not analysed"
+STATUS_ERROR = 'error'           # no plugin produced anything; the dump was NOT analysed
+
+# Which report section depends on which plugins (a section counts as "not
+# analysed" when its plugins were attempted and none of them succeeded).
+SECTION_PLUGINS = {
+    'processes': ('windows.pslist.PsList', 'linux.pslist.PsList'),
+    'process_tree': ('linux.pstree.PsTree',),
+    'hidden_processes': ('windows.psscan.PsScan',),
+    'network': ('windows.netscan.NetScan', 'linux.sockstat.Sockstat'),
+    'modules': ('windows.dlllist.DllList', 'linux.lsmod.Lsmod'),
+    'commands': ('windows.cmdline.CmdLine', 'windows.cmdscan.CmdScan',
+                 'windows.consoles.Consoles', 'linux.bash.Bash'),
+}
+
+# Fragments of Volatility errors that mean "this dump does not match the
+# selected OS / the required symbol table or layer could not be built".
+_MISMATCH_MARKERS = ('UnsatisfiedException', 'Unsatisfied', 'Symbol table',
+                     'Unknown symbol', 'init_task', 'layer requirement',
+                     'translation layer')
+
+
+def _verbose_hint(memory_file):
+    """-v/-vv belong to the main command, so they go BEFORE the "memory" subcommand."""
+    target = shlex.quote(memory_file) if memory_file else "<file>"
+    return f"For more details run: main.py -vv memory {target}"
+
+
+def record_plugin_ok(results, plugin):
+    """Remember that a plugin ran to completion (even if it returned no rows)."""
+    results.setdefault('plugin_status', {})[plugin] = 'ok'
+
+
+def record_plugin_skipped(results, plugin):
+    """Remember that a plugin does not apply to this dump (expected, not an error)."""
+    results.setdefault('plugin_status', {})[plugin] = 'skipped'
+
+
+def record_plugin_error(results, plugin, exc):
+    """Remember that a plugin failed and keep the reason for the report."""
+    results.setdefault('plugin_status', {})[plugin] = 'failed'
+    results.setdefault('plugin_errors', []).append({
+        'plugin': plugin,
+        'error': f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
+    })
+
+
+def sections_not_analysed(results):
+    """Report sections whose plugins all failed (so empty means "unknown")."""
+    status = results.get('plugin_status', {})
+    missing = []
+    for section, names in SECTION_PLUGINS.items():
+        states = [status[name] for name in names if name in status]
+        if 'failed' in states and 'ok' not in states:
+            missing.append(section)
+    return missing
+
+
+def assess_analysis(results, os_forced=False, memory_file=None):
+    """Decide whether the analysis completed, was partial or failed.
+
+    "completed" is only returned when every plugin that was attempted
+    succeeded; a run where Volatility could not analyse the dump at all
+    (e.g. UnsatisfiedException after forcing the wrong --os-type) is
+    "error", never "completed" with empty results.
+
+    Sets status, status_message, next_step, plugin_summary,
+    sections_not_analysed and, when it looks like a wrong OS or missing
+    symbols, os_mismatch_warning.
+    """
+    status_map = results.get('plugin_status', {})
+    succeeded = [n for n, s in status_map.items() if s == 'ok']
+    failed = [n for n, s in status_map.items() if s == 'failed']
+    skipped = [n for n, s in status_map.items() if s == 'skipped']
+    attempted = len(succeeded) + len(failed)
+
+    results['plugin_summary'] = {
+        'attempted': attempted,
+        'succeeded': len(succeeded),
+        'failed': len(failed),
+        'skipped': len(skipped),
+    }
+    results['sections_not_analysed'] = sections_not_analysed(results)
+    results['os_forced'] = bool(os_forced)
+
+    verbose_hint = _verbose_hint(memory_file)
+    os_type = results.get('os_type', 'unknown')
+    other_os = 'windows' if os_type == 'linux' else 'linux'
+
+    if attempted == 0 or not succeeded:
+        results['status'] = STATUS_ERROR
+        results['status_message'] = (
+            f"Analysis FAILED: none of the {attempted} Volatility plugins could run on "
+            f"this dump as {os_type.upper()}. The dump was not analysed, so this is NOT "
+            "a clean result - nothing can be concluded about suspicious activity."
+        )
+        errors = ' '.join(e.get('error', '') for e in results.get('plugin_errors', []))
+        if any(marker in errors for marker in _MISMATCH_MARKERS):
+            forced = " (forced with --os-type)" if os_forced else ""
+            results['os_mismatch_warning'] = (
+                f"The dump was analysed as {os_type.upper()}{forced}, but Volatility could "
+                f"not build a matching layer/symbol table. Either this is not a "
+                f"{os_type.upper()} dump, or the required symbols are missing"
+                + (" (Linux dumps need a kernel symbol file for the exact kernel version)."
+                   if os_type == 'linux' else ".")
+            )
+            if os_forced:
+                results['next_step'] = (
+                    "Re-run without --os-type to use auto-detection, or try "
+                    f"--os-type {other_os}. " + verbose_hint
+                )
+            else:
+                results['next_step'] = (
+                    f"Try --os-type {other_os}, and check that the symbol tables for "
+                    "this OS/kernel are installed. " + verbose_hint
+                )
+        else:
+            results['next_step'] = (
+                "Check plugin_errors for the cause before relying on this result. "
+                + verbose_hint
+            )
+    elif failed:
+        results['status'] = STATUS_PARTIAL
+        results['status_message'] = (
+            f"Analysis INCOMPLETE: {len(failed)} of {attempted} plugins failed "
+            f"({', '.join(failed)}). Empty sections that depend on them were not "
+            "analysed - they do NOT mean that nothing was found."
+        )
+        results['next_step'] = (
+            "Review plugin_errors and fix the cause (symbols, OS type) before "
+            "drawing conclusions from the empty sections. " + verbose_hint
+        )
+    else:
+        results['status'] = STATUS_COMPLETED
+        results['status_message'] = (
+            f"All {attempted} plugins ran successfully. A section with zero findings "
+            "means the checks ran and nothing matched."
+        )
+    return results
+
+
 try:
     import volatility3
     import volatility3.plugins
@@ -595,15 +742,16 @@ def extract_windows_commands(ctx, automagics, results):
             if command:
                 local[(row.get('PID'), str(row.get('Process', '')), command)] += 1
         merge(local, 'cmdline')
+        record_plugin_ok(results, 'windows.cmdline.CmdLine')
     except Exception as e:
-        logger.warning(f"Windows command line extraction failed: {type(e).__name__}: {e}")
+        logger.debug(f"Windows command line extraction failed: {type(e).__name__}: {e}")
         logger.debug(traceback.format_exc())
-        results['plugin_errors'].append({'plugin': 'windows.cmdline.CmdLine',
-                                         'error': f"{type(e).__name__}: {e}"})
+        record_plugin_error(results, 'windows.cmdline.CmdLine', e)
 
     # Commands typed into a console
     from volatility3.plugins.windows import cmdscan, consoles
     for plugin_class, source in ((cmdscan.CmdScan, 'cmdscan'), (consoles.Consoles, 'consoles')):
+        plugin_name = f"windows.{source}.{plugin_class.__name__}"
         try:
             # The plugins would otherwise re-open the registry hives to read
             # the console history size; those layers already exist in this
@@ -621,17 +769,18 @@ def extract_windows_commands(ctx, automagics, results):
                     process = application.get(key) or str(row.get('Process', ''))
                     local[(row.get('PID'), process, data)] += 1
             merge(local, source)
+            record_plugin_ok(results, plugin_name)
         except NotImplementedError as e:
             # The Volatility 3 console plugins only support Windows 10 and
             # newer. On older systems (e.g. Windows 7) this is expected and
             # not an error: those dumps simply have no console history here.
             logger.info(f"Windows {source} skipped (unsupported Windows version): {e}")
             skipped.append(source)
+            record_plugin_skipped(results, plugin_name)
         except Exception as e:
-            logger.warning(f"Windows {source} extraction failed: {type(e).__name__}: {e}")
+            logger.debug(f"Windows {source} extraction failed: {type(e).__name__}: {e}")
             logger.debug(traceback.format_exc())
-            results['plugin_errors'].append({'plugin': f'windows.{source}',
-                                             'error': f"{type(e).__name__}: {e}"})
+            record_plugin_error(results, plugin_name, e)
 
     if skipped:
         results.setdefault('notes', []).append(
@@ -859,6 +1008,9 @@ def analyze_windows_memory(memory_file):
         
     except Exception as e:
         logger.debug(f"System info extraction failed: {type(e).__name__}: {e}")
+        record_plugin_error(results, 'windows.info.Info', e)
+    else:
+        record_plugin_ok(results, 'windows.info.Info')
     
     try:
         # Extract logged-in users (Windows Sessions)
@@ -927,7 +1079,10 @@ def analyze_windows_memory(memory_file):
             logger.info(f"Found {len(results['logged_in_users'])} logged-in users")
         
     except Exception as e:
-        logger.debug(f"User session extraction not available: {type(e).__name__}: {e}")
+        logger.debug(f"User session extraction failed: {type(e).__name__}: {e}")
+        record_plugin_error(results, 'windows.sessions.Sessions', e)
+    else:
+        record_plugin_ok(results, 'windows.sessions.Sessions')
     
     try:
         # Process list
@@ -968,14 +1123,11 @@ def analyze_windows_memory(memory_file):
         
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
-        logger.error(f"Process list extraction failed: {error_msg}")
+        logger.debug(f"Process list extraction failed: {error_msg}")
         logger.debug(traceback.format_exc())
-        
-        # Check if this might be a Linux memory dump
-        if 'Symbol table' in error_msg or 'No such file' in error_msg or 'layer' in error_msg.lower():
-            logger.warning("This might be a Linux memory dump, not Windows!")
-            logger.warning("Try running without --os-type to auto-detect, or specify --os-type linux")
-            results['os_mismatch_warning'] = "This might be a Linux memory dump. Try --os-type linux or remove --os-type for auto-detection."
+        record_plugin_error(results, 'windows.pslist.PsList', e)
+    else:
+        record_plugin_ok(results, 'windows.pslist.PsList')
     
     try:
         # Network connections
@@ -1073,8 +1225,11 @@ def analyze_windows_memory(memory_file):
         logger.info(f"Flagged {len(suspicious_pids)} PIDs with suspicious network activity")
         
     except Exception as e:
-        logger.error(f"Network extraction failed: {type(e).__name__}: {e}")
+        logger.debug(f"Network extraction failed: {type(e).__name__}: {e}")
         logger.debug(traceback.format_exc())
+        record_plugin_error(results, 'windows.netscan.NetScan', e)
+    else:
+        record_plugin_ok(results, 'windows.netscan.NetScan')
     
     try:
         # Loaded modules/DLLs (limited to first 50 for performance)
@@ -1103,26 +1258,33 @@ def analyze_windows_memory(memory_file):
         logger.info(f"Found {len(results['loaded_modules'])} loaded modules")
         
     except Exception as e:
-        logger.error(f"Module extraction failed: {type(e).__name__}: {e}")
+        logger.debug(f"Module extraction failed: {type(e).__name__}: {e}")
         logger.debug(traceback.format_exc())
+        record_plugin_error(results, 'windows.dlllist.DllList', e)
+    else:
+        record_plugin_ok(results, 'windows.dlllist.DllList')
 
     try:
         logger.info("Running psscan...")
         extract_windows_hidden_processes(ctx, automagics, results)
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
-        logger.warning(f"Windows psscan failed: {error_msg}")
+        logger.debug(f"Windows psscan failed: {error_msg}")
         logger.debug(traceback.format_exc())
-        results['plugin_errors'].append({'plugin': 'windows.psscan', 'error': error_msg})
+        record_plugin_error(results, 'windows.psscan.PsScan', e)
+    else:
+        record_plugin_ok(results, 'windows.psscan.PsScan')
 
     try:
         logger.info("Extracting Windows command history...")
         extract_windows_commands(ctx, automagics, results)
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
-        logger.warning(f"Windows command extraction failed: {error_msg}")
+        logger.debug(f"Windows command extraction failed: {error_msg}")
         logger.debug(traceback.format_exc())
-        results['plugin_errors'].append({'plugin': 'windows commands', 'error': error_msg})
+        # Individual console/cmdline plugins record themselves; this is an
+        # unexpected failure of the whole command-extraction step.
+        record_plugin_error(results, 'windows.commands', e)
 
     flag_suspicious_process_behavior(results)
     return results
@@ -1231,18 +1393,11 @@ def analyze_linux_memory(memory_file):
         
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
-        logger.error(f"Linux process list extraction failed: {error_msg}")
+        logger.debug(f"Linux process list extraction failed: {error_msg}")
         logger.debug(traceback.format_exc())
-        results['plugin_errors'].append({
-            'plugin': 'linux.pslist.PsList',
-            'error': error_msg
-        })
-        
-        # Check if this might be a Windows memory dump
-        if 'Unknown symbol' in error_msg or 'init_task' in error_msg:
-            logger.warning("This appears to be a Windows memory dump, not Linux!")
-            logger.warning("Try running without --os-type to auto-detect, or specify --os-type windows")
-            results['os_mismatch_warning'] = "This appears to be a Windows memory dump. Try --os-type windows or remove --os-type for auto-detection."
+        record_plugin_error(results, 'linux.pslist.PsList', e)
+    else:
+        record_plugin_ok(results, 'linux.pslist.PsList')
 
     try:
         # Process hierarchy
@@ -1273,12 +1428,11 @@ def analyze_linux_memory(memory_file):
 
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
-        logger.warning(f"Linux process tree extraction failed: {error_msg}")
+        logger.debug(f"Linux process tree extraction failed: {error_msg}")
         logger.debug(traceback.format_exc())
-        results['plugin_errors'].append({
-            'plugin': 'linux.pstree.PsTree',
-            'error': error_msg
-        })
+        record_plugin_error(results, 'linux.pstree.PsTree', e)
+    else:
+        record_plugin_ok(results, 'linux.pstree.PsTree')
 
     try:
         # Network sockets
@@ -1362,12 +1516,11 @@ def analyze_linux_memory(memory_file):
 
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
-        logger.warning(f"Linux network socket extraction failed: {error_msg}")
+        logger.debug(f"Linux network socket extraction failed: {error_msg}")
         logger.debug(traceback.format_exc())
-        results['plugin_errors'].append({
-            'plugin': 'linux.sockstat.Sockstat',
-            'error': error_msg
-        })
+        record_plugin_error(results, 'linux.sockstat.Sockstat', e)
+    else:
+        record_plugin_ok(results, 'linux.sockstat.Sockstat')
 
     try:
         # Loaded kernel modules
@@ -1398,12 +1551,11 @@ def analyze_linux_memory(memory_file):
 
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
-        logger.warning(f"Linux kernel module extraction failed: {error_msg}")
+        logger.debug(f"Linux kernel module extraction failed: {error_msg}")
         logger.debug(traceback.format_exc())
-        results['plugin_errors'].append({
-            'plugin': 'linux.lsmod.Lsmod',
-            'error': error_msg
-        })
+        record_plugin_error(results, 'linux.lsmod.Lsmod', e)
+    else:
+        record_plugin_ok(results, 'linux.lsmod.Lsmod')
 
     try:
         # Bash command history
@@ -1460,12 +1612,11 @@ def analyze_linux_memory(memory_file):
 
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
-        logger.warning(f"Linux shell history extraction failed: {error_msg}")
+        logger.debug(f"Linux shell history extraction failed: {error_msg}")
         logger.debug(traceback.format_exc())
-        results['plugin_errors'].append({
-            'plugin': 'linux.bash.Bash',
-            'error': error_msg
-        })
+        record_plugin_error(results, 'linux.bash.Bash', e)
+    else:
+        record_plugin_ok(results, 'linux.bash.Bash')
 
     # Collapse duplicate history records into unique findings
     results['suspicious_commands'] = group_suspicious_commands(
@@ -1504,6 +1655,9 @@ def analyze_memory_dump(memory_file, os_type=None):
     file_size = os.path.getsize(memory_file)
     logger.info(f"Analyzing memory dump: {memory_file} ({file_size / (1024**2):.2f} MB)")
     
+    # Remember whether the user forced the OS (affects the failure advice)
+    os_forced = bool(os_type)
+
     # Auto-detect OS if not specified
     if not os_type:
         os_type = detect_os_from_memory(memory_file)
@@ -1519,6 +1673,10 @@ def analyze_memory_dump(memory_file, os_type=None):
             'os_type': 'unknown'
         }
     
+    # Decide completed / partial / error from what the plugins actually did
+    if 'error' not in results:
+        assess_analysis(results, os_forced=os_forced, memory_file=memory_file)
+
     # Add metadata
     results['file_path'] = memory_file
     results['file_size'] = file_size

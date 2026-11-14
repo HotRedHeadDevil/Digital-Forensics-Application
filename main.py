@@ -1,6 +1,7 @@
 import click
 import json
 import os
+import sys
 import logging
 from validators import validate_image_file, validate_yara_rules, validate_output_format
 from output_formatter import format_output
@@ -18,6 +19,85 @@ def print_output(data, format_type='json'):
 
     output = format_output(data, format_type)
     click.echo(output)
+
+def _count_or_none(analysis_data, key, section):
+    """Item count, or None when the section was not analysed.
+
+    A plugin failure must not be reported as "0 found": 0 means the check ran
+    and found nothing, None (null) means the check could not run.
+    """
+    if section in analysis_data.get('sections_not_analysed', []):
+        return None
+    return len(analysis_data.get(key, []))
+
+
+def build_memory_summary(analysis_data, filepath):
+    """Build the memory-analysis summary with an honest status.
+
+    status is one of:
+      completed - every plugin ran; zero findings really means zero findings
+      partial   - some plugins failed; sections listed in sections_not_analysed
+                  are unknown (null counts), not empty
+      error     - the dump could not be analysed; no results are reported
+    """
+    status = analysis_data.get("status", "error" if "error" in analysis_data else "completed")
+
+    if status == "error":
+        summary = {
+            "analysis_type": "memory_dump",
+            "input_file": filepath,
+            "file_size_mb": analysis_data.get('file_size_mb', 0),
+            "os_forced": analysis_data.get('os_forced', False),
+            "status": "error",
+            "error": analysis_data.get("error") or analysis_data.get("status_message"),
+        }
+        for key in ('os_mismatch_warning', 'next_step', 'plugin_summary', 'plugin_errors'):
+            if analysis_data.get(key):
+                summary[key] = analysis_data[key]
+        return summary
+
+    net_stats = analysis_data.get('network_statistics', {})
+    command_count = _count_or_none(analysis_data, 'suspicious_commands', 'commands')
+
+    summary = {
+        "analysis_type": "memory_dump",
+        "input_file": filepath,
+        "file_size_mb": analysis_data.get('file_size_mb', 0),
+        "os_type": analysis_data.get('os_type', 'unknown'),
+        "os_forced": analysis_data.get('os_forced', False),
+        "hostname": analysis_data.get('hostname'),
+        "logged_in_users": analysis_data.get('logged_in_users', []),
+        "status": status,
+        "status_message": analysis_data.get('status_message'),
+        "next_step": analysis_data.get('next_step'),
+        "plugin_summary": analysis_data.get('plugin_summary', {}),
+        "sections_not_analysed": analysis_data.get('sections_not_analysed', []),
+        "process_count": _count_or_none(analysis_data, 'processes', 'processes'),
+        "network_connections": _count_or_none(analysis_data, 'network_connections', 'network'),
+        "network_statistics": net_stats,
+        "suspicious_processes": len(analysis_data.get('suspicious_processes', [])),
+        "suspicious_items": len(analysis_data.get('suspicious_items', [])),
+        "suspicious_commands": command_count,
+        "suspicious_command_records": (
+            None if command_count is None
+            else analysis_data.get('suspicious_command_records', 0)),
+        "processes": analysis_data.get('processes', []),
+        "process_tree": analysis_data.get('process_tree', []),
+        "network": analysis_data.get('network_connections', []),
+        "suspicious": analysis_data.get('suspicious_processes', []),
+        "suspicious_findings": analysis_data.get('suspicious_items', []),
+        "suspicious_command_findings": analysis_data.get('suspicious_commands', []),
+        "modules": analysis_data.get('loaded_modules', []),
+        "kernel_modules": analysis_data.get('kernel_modules', []),
+        "shell_history": analysis_data.get('shell_history', []),
+        "plugin_errors": analysis_data.get('plugin_errors', []),
+        "notes": analysis_data.get('notes', []),
+        "hidden_processes": analysis_data.get('hidden_processes')
+    }
+    if analysis_data.get('os_mismatch_warning'):
+        summary["os_mismatch_warning"] = analysis_data['os_mismatch_warning']
+    return summary
+
 
 @click.group()
 @click.option('--verbose', '-v', count=True, 
@@ -54,55 +134,20 @@ def memory(filepath, os_type, output):
         from memory_analyzer import analyze_memory_dump
     except ImportError as e:
         click.echo(json.dumps({"error": f"Memory analysis is unavailable: {e}"}, indent=4), err=True)
-        return
+        sys.exit(1)
     
     click.echo(f"Analyzing memory dump: {os.path.basename(filepath)}")
     
     # Analyze memory dump
     analysis_data = analyze_memory_dump(filepath, os_type=os_type.lower() if os_type else None)
-    
-    if "error" in analysis_data:
-        summary = {
-            "analysis_type": "memory_dump",
-            "input_file": filepath,
-            "file_size_mb": analysis_data.get('file_size_mb', 0),
-            "status": "error",
-            "error": analysis_data["error"]
-        }
-    else:
-        # Build summary with network statistics
-        net_stats = analysis_data.get('network_statistics', {})
-        
-        summary = {
-            "analysis_type": "memory_dump",
-            "input_file": filepath,
-            "file_size_mb": analysis_data.get('file_size_mb', 0),
-            "os_type": analysis_data.get('os_type', 'unknown'),
-            "hostname": analysis_data.get('hostname'),
-            "logged_in_users": analysis_data.get('logged_in_users', []),
-            "status": "completed",
-            "process_count": len(analysis_data.get('processes', [])),
-            "network_connections": len(analysis_data.get('network_connections', [])),
-            "network_statistics": net_stats,
-            "suspicious_processes": len(analysis_data.get('suspicious_processes', [])),
-            "suspicious_items": len(analysis_data.get('suspicious_items', [])),
-            "suspicious_commands": len(analysis_data.get('suspicious_commands', [])),
-            "suspicious_command_records": analysis_data.get('suspicious_command_records', 0),
-            "processes": analysis_data.get('processes', []),
-            "process_tree": analysis_data.get('process_tree', []),
-            "network": analysis_data.get('network_connections', []),
-            "suspicious": analysis_data.get('suspicious_processes', []),
-            "suspicious_findings": analysis_data.get('suspicious_items', []),
-            "suspicious_command_findings": analysis_data.get('suspicious_commands', []),
-            "modules": analysis_data.get('loaded_modules', []),
-            "kernel_modules": analysis_data.get('kernel_modules', []),
-            "shell_history": analysis_data.get('shell_history', []),
-            "plugin_errors": analysis_data.get('plugin_errors', []),
-            "notes": analysis_data.get('notes', []),
-            "hidden_processes": analysis_data.get('hidden_processes')
-        }
-    
+
+    summary = build_memory_summary(analysis_data, filepath)
     print_output(summary, format_type=output)
+
+    # A failed analysis must be distinguishable from a clean one in scripts too
+    if summary["status"] == "error":
+        sys.exit(1)
+    return
 
 @cli.command()
 @click.argument('filepath', type=click.Path(exists=True))

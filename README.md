@@ -91,6 +91,20 @@ severity. Individual Linux plugin
 failures are reported in the `plugin_errors` result while the remaining
 plugins continue to run.
 
+#### Result status: failed vs. clean analysis
+
+The memory summary never reports a failed analysis as a clean one. The
+`status` field has three values:
+
+| status      | meaning                                                                                                                                                                                                       |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `completed` | Every Volatility plugin ran. Zero findings really means nothing matched.                                                                                                                                      |
+| `partial`   | Some plugins failed. Counts for the affected sections are `null` / "NOT ANALYSED" (not `0`) and listed in `sections_not_analysed`.                                                                            |
+| `error`     | No plugin could run (e.g. wrong `--os-type`, `UnsatisfiedException`, missing symbols). No results are reported, `os_mismatch_warning` and `next_step` explain what to try, and the command exits with code 1. |
+
+`plugin_summary` shows how many plugins succeeded, failed or were skipped, and
+`plugin_errors` lists every failure with its reason.
+
 ```bash
 # Analyze memory dump (auto-detect OS)
 uv run python main.py memory dump.vmem

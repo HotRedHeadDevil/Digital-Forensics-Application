@@ -127,7 +127,13 @@ def _format_csv_memory(data):
     Returns:
         str: CSV formatted string
     """
+    if data.get('status') == 'error':
+        return (f"Memory analysis FAILED - nothing to export. "
+                f"{data.get('error') or ''} Use --output table or json for details.").strip()
     processes = data.get('processes', [])
+    if not processes and 'processes' in (data.get('sections_not_analysed') or []):
+        return ("The process list could not be analysed (plugin failed), so there is "
+                "nothing to export. Use --output json for the plugin errors.")
     if not processes:
         return "No processes to export as CSV. Try --output json for full details (including network connections and loaded modules)."
 
@@ -374,6 +380,31 @@ def _format_plugin_errors(data):
     return lines
 
 
+def _fmt_count(value):
+    """Counts are None when the section was not analysed (distinct from 0)."""
+    return "NOT ANALYSED" if value is None else str(value)
+
+
+def _not_analysed(data, section):
+    return section in (data.get('sections_not_analysed') or [])
+
+
+def _format_analysis_problem(data):
+    """Banner + details explaining why the result must not be read as clean."""
+    lines = []
+    if data.get('status_message'):
+        lines.append(data['status_message'])
+    summary = data.get('plugin_summary') or {}
+    if summary:
+        lines.append(f"Plugins: {summary.get('succeeded', 0)} succeeded, "
+                     f"{summary.get('failed', 0)} failed, {summary.get('skipped', 0)} skipped")
+    if data.get('os_mismatch_warning'):
+        lines.append(f"Possible OS/symbol mismatch: {data['os_mismatch_warning']}")
+    if data.get('next_step'):
+        lines.append(f"Next step: {data['next_step']}")
+    return lines
+
+
 def format_memory_table(data):
     """Format memory dump analysis as ASCII table.
     
@@ -391,26 +422,52 @@ def format_memory_table(data):
     output.append("=" * 110)
     output.append(f"Input File: {data.get('input_file', 'N/A')}")
     output.append(f"File Size: {data.get('file_size_mb', 0):.2f} MB")
-    output.append(f"OS Type: {data.get('os_type', 'Unknown').upper()}")
+    if data.get('status') != 'error':
+        output.append(f"OS Type: {data.get('os_type', 'Unknown').upper()}")
     output.append(f"Status: {data.get('status', 'N/A')}")
     
     if data.get('status') == 'error':
-        output.append(f"\nError: {data.get('error', 'Unknown error')}")
+        output.append("")
+        output.append("ANALYSIS FAILED")
+        output.append("-" * 110)
+        summary = data.get('plugin_summary') or {}
+        if summary:
+            output.append(f"Plugins: {summary.get('succeeded', 0)} succeeded, "
+                          f"{summary.get('failed', 0)} failed, {summary.get('skipped', 0)} skipped")
+        if data.get('os_mismatch_warning'):
+            output.append(f"Possible OS/symbol mismatch: {data['os_mismatch_warning']}")
+        if data.get('next_step'):
+            output.append(f"Next step: {data['next_step']}")
+        if not summary and data.get('error'):
+            output.append(f"Error: {data['error']}")
+        output.append("")
+        output.extend(_format_plugin_errors(data))
         output.append("=" * 110)
         return '\n'.join(output)
-    
-    # Check for OS mismatch warning
-    if data.get('os_mismatch_warning'):
+
+    if data.get('status') == 'partial':
+        output.append("")
+        output.append("WARNING: ANALYSIS INCOMPLETE - empty sections may mean 'not analysed', not 'nothing found'")
+        output.append("-" * 110)
+        output.extend(_format_analysis_problem(data))
+        output.append("-" * 110)
+        output.append("")
+    elif data.get('status_message'):
+        output.append(data['status_message'])
+
+    # Check for OS mismatch warning (partial results only; errors printed above)
+    if data.get('status') != 'partial' and data.get('os_mismatch_warning'):
         output.append("")
         output.append("WARNING: POSSIBLE OS TYPE MISMATCH")
         output.append("-" * 110)
         output.append(f"   {data['os_mismatch_warning']}")
         output.append("-" * 110)
         output.append("")
-    
-    output.append(f"Total Processes: {data.get('process_count', 0)}")
-    output.append(f"Network Connections: {data.get('network_connections', 0)}")
-    output.append(f"Suspicious Findings: {data.get('suspicious_items', 0)}")
+
+    output.append(f"Total Processes: {_fmt_count(data.get('process_count', 0))}")
+    output.append(f"Network Connections: {_fmt_count(data.get('network_connections', 0))}")
+    output.append(f"Suspicious Findings: {data.get('suspicious_items', 0)}"
+                  + (" (incomplete)" if data.get('status') == 'partial' else ""))
     unique_cmds = data.get('suspicious_commands', 0)
     raw_cmds = data.get('suspicious_command_records', unique_cmds)
     if data.get('os_type', '').lower() == 'linux':
@@ -419,7 +476,10 @@ def format_memory_table(data):
         output.append(f"Shell History Entries: {len(data.get('shell_history', []))}")
     else:
         output.append(f"Command History Entries: {len(data.get('shell_history', []))}")
-    output.append(f"Suspicious Commands: {unique_cmds} unique ({raw_cmds} records)")
+    if unique_cmds is None:
+        output.append("Suspicious Commands: NOT ANALYSED")
+    else:
+        output.append(f"Suspicious Commands: {unique_cmds} unique ({raw_cmds} records)")
     if data.get('plugin_errors'):
         output.append(f"Plugin Errors: {len(data['plugin_errors'])}")
     output.append("")
@@ -447,6 +507,8 @@ def format_memory_table(data):
 
         if len(other_findings) > 20:
             output.append(f"  ... and {len(other_findings) - 20} more")
+    elif _not_analysed(data, 'network'):
+        output.append("  NOT ANALYSED - the network plugin failed (see PLUGIN ERRORS below).")
     else:
         output.append("  No suspicious network connections found.")
     output.append("")
@@ -454,8 +516,9 @@ def format_memory_table(data):
     if command_findings:
         output.extend(_format_command_findings(command_findings))
     else:
-        output.extend(["-" * 110, "SUSPICIOUS COMMANDS", "-" * 110,
-                       "  No suspicious commands found.", ""])
+        message = ("  NOT ANALYSED - the command-history plugin failed (see PLUGIN ERRORS below)."
+                   if _not_analysed(data, 'commands') else "  No suspicious commands found.")
+        output.extend(["-" * 110, "SUSPICIOUS COMMANDS", "-" * 110, message, ""])
     for note in data.get('notes') or []:
         output.append(f"  Note: {note}")
     if data.get('notes'):
